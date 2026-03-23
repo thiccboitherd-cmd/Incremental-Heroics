@@ -1,0 +1,2934 @@
+--!strict
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local Theme = require(ReplicatedStorage:WaitForChild("Theme"))
+local UIFramework = require(ReplicatedStorage:WaitForChild("UIFramework"))
+
+local CombatUpdateEvent = ReplicatedStorage:WaitForChild("CombatUpdateEvent") :: RemoteEvent
+local CombatActionEvent = ReplicatedStorage:WaitForChild("CombatActionEvent") :: RemoteEvent
+local UpgradeStatEvent = ReplicatedStorage:WaitForChild("UpgradeStatEvent") :: RemoteEvent
+local RollGachaEvent = ReplicatedStorage:WaitForChild("RollGachaEvent") :: RemoteEvent
+local ChangeTaskEvent = ReplicatedStorage:WaitForChild("ChangeTaskEvent") :: RemoteEvent
+local StartCombatEvent = ReplicatedStorage:WaitForChild("StartCombatEvent") :: RemoteEvent
+local EquipMoveEvent = ReplicatedStorage:WaitForChild("EquipMoveEvent") :: RemoteEvent
+local EquipGearEvent = ReplicatedStorage:WaitForChild("EquipGearEvent") :: RemoteEvent
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local statsFolder = player:WaitForChild("PlayerStats")
+local heroCoinsVal = statsFolder:WaitForChild("HeroCoins") :: IntValue
+local trainingXPVal = statsFolder:WaitForChild("TrainingXP") :: IntValue
+local quirkVal = statsFolder:WaitForChild("CurrentQuirk") :: StringValue
+local activeTask = statsFolder:WaitForChild("ActiveTask") :: StringValue
+local spinsVal = statsFolder:WaitForChild("Spins") :: IntValue
+local rebirthsVal = player:WaitForChild("leaderstats"):WaitForChild("Rebirths") :: IntValue
+
+-- ==========================================
+-- GACHA DICTIONARIES & COLORS
+-- ==========================================
+local RarityColors = {
+	Trash = Color3.fromRGB(130, 130, 130),
+	Common = Color3.fromRGB(220, 220, 220),
+	Uncommon = Color3.fromRGB(80, 220, 100),
+	Rare = Color3.fromRGB(50, 150, 255),
+	Elite = Color3.fromRGB(255, 100, 200),
+	Epic = Color3.fromRGB(180, 80, 255),
+	Legendary = Color3.fromRGB(255, 180, 50),
+	Mythic = Color3.fromRGB(255, 50, 50),
+	Secret = Color3.fromRGB(50, 255, 255)
+}
+
+local RarityGlowIntensity = {
+	Trash = 0, Common = 0, Uncommon = 0.3, Rare = 0.5,
+	Elite = 0.7, Epic = 0.8, Legendary = 1, Mythic = 1, Secret = 1
+}
+
+local GachaPools = {
+	Quirk = {
+		Trash = {"Long Neck", "Rubber Hair"}, Common = {"Tail", "Big Fist", "Tape"}, Uncommon = {"Hardening", "Zero Gravity", "Frog"},
+		Rare = {"Acid", "Electrification", "Steel", "Copy"}, Elite = {"Brainwashing", "Whirlwind", "Vibration"},
+		Epic = {"Dark Shadow", "Engine", "Permeation", "Fat Absorption"}, Legendary = {"Explosion", "Half-Cold", "Decay", "Overhaul"},
+		Mythic = {"Awakened Decay", "New Order", "Weather", "Rewind"}, Secret = {"One For All", "All For One"}
+	},
+	Trait = {
+		Trash = {"Clumsy", "Weak Grip"}, Common = {"Average Output", "Late Bloomer"}, Uncommon = {"Hyperactive", "Studious"},
+		Rare = {"Prodigy", "Savage"}, Elite = {"Iron Will", "Quick Thinker"}, Epic = {"Mutant Genes", "Awakened Potential"},
+		Legendary = {"Chosen One", "Indomitable"}, Mythic = {"Perfect Vessel", "Apex Predator"}, Secret = {"Quirk Singularity"}
+	},
+	Style = {
+		Trash = {"Flailing", "Rock Thrower"}, Common = {"Quirkless", "Pipe", "Sword"}, Uncommon = {"Knife", "Shoot Style", "Boxer"},
+		Rare = {"Dual Knives", "Judo", "Acrobat"}, Elite = {"Gunhead Arts", "Scarf", "Sniper"}, Epic = {"Samurai", "Yakuza", "Sumo"},
+		Legendary = {"Hero Killer Flow", "Erasure Arts", "Luna Rush"}, Mythic = {"Nomu Brawling", "Overclock"}, Secret = {"Prime All Might", "Prime AFO Stance"}
+	}
+}
+
+local function getRarity(category: string, itemName: string): string
+	if itemName == "None" or itemName == "[ NONE ]" then return "Common" end
+	for rarity, items in pairs(GachaPools[category]) do
+		for _, item in ipairs(items) do
+			if item == itemName then return rarity end
+		end
+	end
+	return "Common"
+end
+
+-- ==========================================
+-- SHARED UI REFERENCES
+-- ==========================================
+local pages = {}
+local navButtons = {}
+local currentTab = ""
+
+local shared_mapOverlay = nil
+local shared_isRollingActive = false
+local shared_isRollingCategory = { Quirk = false, Trait = false, Style = false }
+local shared_playGachaAnimation = nil
+
+local shared_selectedGearSlot = "WEAPON"
+local shared_gearSlotUIs = {}
+local shared_selectedSlotIndex = 1
+local shared_activeSlotBtns = {}
+
+local shared_turnOrderPanelGui = nil
+local shared_turnIndicator = nil
+local shared_enemiesContainer = nil
+local shared_alliesContainer = nil
+local shared_movesScrollGui = nil
+local shared_combatLogText = nil
+local shared_skipLogBtn = nil
+local shared_resultOverlay = nil
+local shared_rewardsContainer = nil
+local shared_resultTitle = nil
+local shared_resultDesc = nil
+
+-- ==========================================
+-- UTILITY: CLEAR CONTAINER
+-- ==========================================
+local function clearContainer(container: Instance)
+	for _, child in ipairs(container:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") and not child:IsA("UIGridLayout") then
+			child:Destroy()
+		end
+	end
+end
+
+-- ==========================================
+-- NEW: HOVER EFFECT SYSTEM
+-- Adds a subtle scale/brightness tween when hovering over any GuiButton
+-- ==========================================
+local function applyHoverEffect(btn: GuiButton, scaleUp: number?, brightenBy: number?)
+	local targetScale = scaleUp or 1.04
+	local dimScale = 1 / targetScale
+	local uiScale = btn:FindFirstChildWhichIsA("UIScale")
+	if not uiScale then
+		uiScale = Instance.new("UIScale", btn)
+		uiScale.Scale = 1
+	end
+	local origColor = btn.BackgroundColor3
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(uiScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = targetScale}):Play()
+		if brightenBy then
+			local r = math.clamp(origColor.R + brightenBy/255, 0, 1)
+			local g = math.clamp(origColor.G + brightenBy/255, 0, 1)
+			local b = math.clamp(origColor.B + brightenBy/255, 0, 1)
+			TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.new(r, g, b)}):Play()
+		end
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(uiScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = 1}):Play()
+		if brightenBy then
+			TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundColor3 = origColor}):Play()
+		end
+	end)
+	btn.MouseButton1Down:Connect(function()
+		TweenService:Create(uiScale, TweenInfo.new(0.06), {Scale = dimScale}):Play()
+	end)
+	btn.MouseButton1Up:Connect(function()
+		TweenService:Create(uiScale, TweenInfo.new(0.1, Enum.EasingStyle.Back), {Scale = targetScale}):Play()
+	end)
+end
+
+-- ==========================================
+-- NEW: TOAST NOTIFICATION SYSTEM
+-- Spawns a floating "+100 XP", "LEVEL UP!", or custom message above the UI
+-- ==========================================
+local toastContainer = nil
+
+local function BuildToastSystem(screenGui: ScreenGui)
+	toastContainer = Instance.new("Frame", screenGui)
+	toastContainer.Name = "ToastContainer"
+	toastContainer.Size = UDim2.new(0, 280, 1, -60)
+	toastContainer.AnchorPoint = Vector2.new(1, 0)
+	toastContainer.Position = UDim2.new(1, -10, 0, 55)
+	toastContainer.BackgroundTransparency = 1
+	toastContainer.ZIndex = 200
+	local layout = Instance.new("UIListLayout", toastContainer)
+	layout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+	layout.Padding = UDim.new(0, 6)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+end
+
+local toastCounter = 0
+local function showToast(message: string, color: Color3?, duration: number?, icon: string?)
+	if not toastContainer then return end
+	toastCounter += 1
+	local toastColor = color or Color3.fromRGB(50, 220, 100)
+	local toastDuration = duration or 2.8
+
+	local toastFrame = Instance.new("Frame", toastContainer)
+	toastFrame.Name = "Toast_" .. toastCounter
+	toastFrame.Size = UDim2.new(1, 0, 0, 40)
+	toastFrame.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+	toastFrame.BorderSizePixel = 0
+	toastFrame.BackgroundTransparency = 1
+	toastFrame.LayoutOrder = -toastCounter
+	local corner = Instance.new("UICorner", toastFrame)
+	corner.CornerRadius = UDim.new(0, 8)
+
+	local leftAccent = Instance.new("Frame", toastFrame)
+	leftAccent.Size = UDim2.new(0, 4, 1, 0)
+	leftAccent.BackgroundColor3 = toastColor
+	leftAccent.BorderSizePixel = 0
+	leftAccent.BackgroundTransparency = 1
+	local accentCorner = Instance.new("UICorner", leftAccent)
+	accentCorner.CornerRadius = UDim.new(0, 4)
+
+	local label = Instance.new("TextLabel", toastFrame)
+	label.Size = UDim2.new(1, -18, 1, 0)
+	label.Position = UDim2.new(0, 14, 0, 0)
+	label.BackgroundTransparency = 1
+	label.Text = message
+	label.TextColor3 = Color3.fromRGB(230, 230, 240)
+	label.TextSize = 13
+	label.Font = Enum.Font.GothamBold
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextWrapped = true
+	label.TextTransparency = 1
+
+	local stroke = Instance.new("UIStroke", toastFrame)
+	stroke.Color = toastColor
+	stroke.Thickness = 1
+	stroke.Transparency = 1
+
+	-- Slide in from right
+	toastFrame.Position = UDim2.new(1.1, 0, 0, 0)
+	TweenService:Create(toastFrame, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 0.12}):Play()
+	TweenService:Create(leftAccent, TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+	TweenService:Create(stroke, TweenInfo.new(0.3), {Transparency = 0.6}):Play()
+	TweenService:Create(label, TweenInfo.new(0.25), {TextTransparency = 0}):Play()
+
+	task.delay(toastDuration, function()
+		TweenService:Create(toastFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {BackgroundTransparency = 1, Position = UDim2.new(1.1, 0, 0, 0)}):Play()
+		TweenService:Create(label, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
+		TweenService:Create(leftAccent, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+		task.wait(0.45)
+		toastFrame:Destroy()
+	end)
+end
+
+-- ==========================================
+-- NEW: FLOATING DAMAGE NUMBER SYSTEM
+-- Spawns "+120 DMG" style labels that float up and fade
+-- ==========================================
+local floatingTextLayer = nil
+
+local function BuildFloatingTextLayer(screenGui: ScreenGui)
+	floatingTextLayer = Instance.new("Frame", screenGui)
+	floatingTextLayer.Name = "FloatingTextLayer"
+	floatingTextLayer.Size = UDim2.new(1, 0, 1, 0)
+	floatingTextLayer.BackgroundTransparency = 1
+	floatingTextLayer.ZIndex = 150
+	floatingTextLayer.Active = false -- pass through clicks
+end
+
+local function spawnFloatingText(text: string, color: Color3, screenPos: UDim2, isCrit: boolean?)
+	if not floatingTextLayer then return end
+	local label = Instance.new("TextLabel", floatingTextLayer)
+	label.Size = UDim2.new(0, 120, 0, 30)
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	label.Position = screenPos
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextColor3 = color
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = isCrit and 22 or 16
+	label.TextStrokeTransparency = 0.5
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.ZIndex = 151
+
+	if isCrit then
+		local scale = Instance.new("UIScale", label)
+		scale.Scale = 0.5
+		TweenService:Create(scale, TweenInfo.new(0.2, Enum.EasingStyle.Back), {Scale = 1.3}):Play()
+	end
+
+	local targetPos = UDim2.new(screenPos.X.Scale, screenPos.X.Offset, screenPos.Y.Scale, screenPos.Y.Offset - 70)
+	TweenService:Create(label, TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = targetPos, TextTransparency = 1}):Play()
+	game:GetService("Debris"):AddItem(label, 1.3)
+end
+
+-- ==========================================
+-- NEW: ANIMATED COUNTER (smooth number transitions)
+-- ==========================================
+local function animateCounter(label: any, fromVal: number, toVal: number, prefix: string, suffix: string, duration: number?)
+	local dur = duration or 0.5
+	local startTime = os.clock()
+	local diff = toVal - fromVal
+	local connection
+	connection = RunService.RenderStepped:Connect(function()
+		local elapsed = math.min(os.clock() - startTime, dur)
+		local t = elapsed / dur
+		-- Ease out cubic
+		t = 1 - (1 - t)^3
+		local current = math.floor(fromVal + diff * t)
+		label:SetText(prefix .. current .. suffix)
+		if elapsed >= dur then
+			label:SetText(prefix .. toVal .. suffix)
+			connection:Disconnect()
+		end
+	end)
+end
+
+-- ==========================================
+-- NEW: REBIRTH CONFIRMATION MODAL
+-- ==========================================
+local rebirthModal = nil
+
+local function BuildRebirthModal(screenGui: ScreenGui)
+	rebirthModal = Instance.new("Frame", screenGui)
+	rebirthModal.Name = "RebirthModal"
+	rebirthModal.Size = UDim2.new(1, 0, 1, 0)
+	rebirthModal.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	rebirthModal.BackgroundTransparency = 0.5
+	rebirthModal.Visible = false
+	rebirthModal.ZIndex = 300
+
+	local blockInput = Instance.new("TextButton", rebirthModal)
+	blockInput.Size = UDim2.new(1, 0, 1, 0)
+	blockInput.Text = ""; blockInput.BackgroundTransparency = 1; blockInput.ZIndex = 299
+
+	local panel = Instance.new("Frame", rebirthModal)
+	panel.Size = UDim2.new(0, 420, 0, 280)
+	panel.AnchorPoint = Vector2.new(0.5, 0.5)
+	panel.Position = UDim2.new(0.5, 0, 0.5, 0)
+	panel.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+	panel.BorderSizePixel = 0
+	panel.ZIndex = 301
+	local pCorner = Instance.new("UICorner", panel); pCorner.CornerRadius = UDim.new(0, 12)
+	local pStroke = Instance.new("UIStroke", panel)
+	pStroke.Color = Color3.fromRGB(255, 180, 50)
+	pStroke.Thickness = 2
+
+	local title = Instance.new("TextLabel", panel)
+	title.Size = UDim2.new(1, 0, 0, 50)
+	title.Position = UDim2.new(0, 0, 0, 15)
+	title.BackgroundTransparency = 1
+	title.Text = "⚠ REBIRTH CONFIRMATION"
+	title.TextColor3 = Color3.fromRGB(255, 180, 50)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 20
+	title.ZIndex = 302
+
+	local warning = Instance.new("TextLabel", panel)
+	warning.Size = UDim2.new(1, -40, 0, 80)
+	warning.Position = UDim2.new(0, 20, 0, 65)
+	warning.BackgroundTransparency = 1
+	warning.Text = "Are you sure you want to Rebirth?\n\nThis will RESET your Stats and Training XP, but grant +1 Rebirth Point, unlock new content, and carry over your Quirk."
+	warning.TextColor3 = Color3.fromRGB(200, 200, 210)
+	warning.Font = Enum.Font.Gotham
+	warning.TextSize = 14
+	warning.TextWrapped = true
+	warning.ZIndex = 302
+
+	local coinsWarning = Instance.new("TextLabel", panel)
+	coinsWarning.Size = UDim2.new(1, -40, 0, 25)
+	coinsWarning.Position = UDim2.new(0, 20, 0, 155)
+	coinsWarning.BackgroundTransparency = 1
+	coinsWarning.Text = "Hero Coins will be preserved."
+	coinsWarning.TextColor3 = Color3.fromRGB(80, 220, 100)
+	coinsWarning.Font = Enum.Font.GothamBold
+	coinsWarning.TextSize = 13
+	coinsWarning.ZIndex = 302
+
+	local confirmBtn = Instance.new("TextButton", panel)
+	confirmBtn.Size = UDim2.new(0, 160, 0, 42)
+	confirmBtn.Position = UDim2.new(0, 20, 1, -60)
+	confirmBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+	confirmBtn.Text = "CONFIRM REBIRTH"
+	confirmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	confirmBtn.Font = Enum.Font.GothamBold
+	confirmBtn.TextSize = 14
+	confirmBtn.BorderSizePixel = 0
+	confirmBtn.ZIndex = 302
+	local cCorner = Instance.new("UICorner", confirmBtn); cCorner.CornerRadius = UDim.new(0, 8)
+	applyHoverEffect(confirmBtn, 1.05, 20)
+
+	local cancelBtn = Instance.new("TextButton", panel)
+	cancelBtn.Size = UDim2.new(0, 160, 0, 42)
+	cancelBtn.AnchorPoint = Vector2.new(1, 0)
+	cancelBtn.Position = UDim2.new(1, -20, 1, -60)
+	cancelBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+	cancelBtn.Text = "CANCEL"
+	cancelBtn.TextColor3 = Color3.fromRGB(200, 200, 210)
+	cancelBtn.Font = Enum.Font.GothamBold
+	cancelBtn.TextSize = 14
+	cancelBtn.BorderSizePixel = 0
+	cancelBtn.ZIndex = 302
+	local ccCorner = Instance.new("UICorner", cancelBtn); ccCorner.CornerRadius = UDim.new(0, 8)
+	applyHoverEffect(cancelBtn, 1.05, 15)
+
+	local function closeModal()
+		local scale = Instance.new("UIScale", panel)
+		TweenService:Create(scale, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Scale = 0.85}):Play()
+		TweenService:Create(rebirthModal, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+		task.wait(0.22)
+		rebirthModal.Visible = false
+		scale:Destroy()
+	end
+
+	cancelBtn.MouseButton1Click:Connect(closeModal)
+	blockInput.MouseButton1Click:Connect(closeModal)
+
+	confirmBtn.MouseButton1Click:Connect(function()
+		-- Fire rebirth event to server (assumes RebirthEvent exists)
+		-- RebirthEvent:FireServer()
+		closeModal()
+		showToast("🔄 REBIRTH INITIATED! Resetting stats...", Color3.fromRGB(255, 180, 50), 3)
+	end)
+
+	return function() -- openModal function
+		rebirthModal.Visible = true
+		local scale = Instance.new("UIScale", panel)
+		scale.Scale = 0.8
+		TweenService:Create(scale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+		TweenService:Create(rebirthModal, TweenInfo.new(0.2), {BackgroundTransparency = 0.5}):Play()
+	end
+end
+
+-- ==========================================
+-- INITIAL UI SETUP & BASE STRUCTURE
+-- ==========================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "HeroicIdleUI"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+-- Subtle ambient background gradient
+local bgGradient = Instance.new("Frame", screenGui)
+bgGradient.Size = UDim2.new(1, 0, 1, 0)
+bgGradient.BackgroundColor3 = Color3.fromRGB(8, 8, 14)
+bgGradient.BorderSizePixel = 0
+bgGradient.ZIndex = 0
+
+local topBar = UIFramework.UIFrame.new("TopBar", Theme.Colors.Background, screenGui)
+topBar.Gui.Size = UDim2.new(1, 0, 0, 50)
+topBar.Gui.ZIndex = 2
+
+-- Accent line under nav bar
+local navAccent = Instance.new("Frame", topBar.Gui)
+navAccent.Size = UDim2.new(1, 0, 0, 2)
+navAccent.Position = UDim2.new(0, 0, 1, -2)
+navAccent.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+navAccent.BorderSizePixel = 0
+navAccent.ZIndex = 1
+
+local navContainer = Instance.new("Frame", topBar.Gui)
+navContainer.Size = UDim2.new(0.6, 0, 1, 0)
+navContainer.Position = UDim2.new(0.2, 0, 0, 0)
+navContainer.BackgroundTransparency = 1
+navContainer.ZIndex = 1
+local topLayout = Instance.new("UIListLayout", navContainer)
+topLayout.FillDirection = Enum.FillDirection.Horizontal
+topLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+topLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+topLayout.Padding = UDim.new(0, 8)
+
+local centerContainer = Instance.new("Frame")
+centerContainer.Name = "CenterContainer"
+centerContainer.Size = UDim2.new(1, 0, 1, -50)
+centerContainer.Position = UDim2.new(0, 0, 0, 50)
+centerContainer.BackgroundTransparency = 1
+centerContainer.Parent = screenGui
+
+-- ==========================================
+-- IMPROVED: TAB SWITCHING WITH FADE
+-- ==========================================
+-- Sliding active-tab indicator under nav buttons
+local tabIndicator = Instance.new("Frame", topBar.Gui)
+tabIndicator.Size = UDim2.new(0, 100, 0, 3)
+tabIndicator.Position = UDim2.new(0, 0, 1, -3)
+tabIndicator.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+tabIndicator.BorderSizePixel = 0
+tabIndicator.ZIndex = 2
+tabIndicator.Visible = false
+
+local function switchTab(tabName: string)
+	for name, page in pairs(pages) do
+		if name == tabName then
+			page.Visible = true
+			-- Fade in
+			local contentScale = page:FindFirstChildWhichIsA("UIScale")
+			if not contentScale then
+				contentScale = Instance.new("UIScale", page)
+			end
+			contentScale.Scale = 0.97
+			TweenService:Create(contentScale, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = 1}):Play()
+		else
+			page.Visible = false
+		end
+		if navButtons[name] then
+			if name == tabName then
+				navButtons[name].Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+				navButtons[name].Gui.Font = Enum.Font.GothamBold
+				-- Move indicator
+				if navButtons[name].Gui.AbsolutePosition then
+					tabIndicator.Visible = true
+					TweenService:Create(tabIndicator, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+						Position = UDim2.new(0, navButtons[name].Gui.AbsolutePosition.X - topBar.Gui.AbsolutePosition.X, 1, -3),
+						Size = UDim2.new(0, navButtons[name].Gui.AbsoluteSize.X, 0, 3)
+					}):Play()
+				end
+			else
+				navButtons[name].Gui.TextColor3 = Theme.Colors.Text
+				navButtons[name].Gui.Font = Enum.Font.Gotham
+			end
+		end
+	end
+
+	currentTab = tabName
+	if shared_mapOverlay then
+		shared_mapOverlay.Visible = false
+	end
+end
+
+local navNames = {"HOME", "MISSIONS", "HERO SET", "INVENTORY", "COMBAT"}
+for _, name in ipairs(navNames) do
+	local btn = UIFramework.UIButton.new("Nav_"..name, name, Theme.Colors.Background, navContainer)
+	btn.Gui.Size = UDim2.new(0, 110, 0, 40)
+	btn.Gui.Font = Enum.Font.Gotham
+	btn.Gui.TextSize = 13
+	navButtons[name] = btn
+	applyHoverEffect(btn.Gui, 1.03, 10)
+
+	local page = Instance.new("Frame")
+	page.Name = name .. "Page"
+	page.Size = UDim2.new(1, 0, 1, 0)
+	page.BackgroundTransparency = 1
+	page.Visible = false
+	page.Parent = centerContainer
+	pages[name] = page
+
+	btn:OnClick(function() switchTab(name) end)
+end
+
+-- Initialize utility systems
+BuildToastSystem(screenGui)
+BuildFloatingTextLayer(screenGui)
+local openRebirthModal = BuildRebirthModal(screenGui)
+
+-- ==========================================
+-- BUILDER: TOP BAR CURRENCIES (Improved)
+-- ==========================================
+local function BuildTopBarCurrencies()
+	local currencyContainer = Instance.new("Frame", topBar.Gui)
+	currencyContainer.Size = UDim2.new(0.18, 0, 1, 0)
+	currencyContainer.AnchorPoint = Vector2.new(1, 0)
+	currencyContainer.Position = UDim2.new(1, -10, 0, 0)
+	currencyContainer.BackgroundTransparency = 1
+	currencyContainer.ZIndex = 10
+	local currencyLayout = Instance.new("UIListLayout", currencyContainer)
+	currencyLayout.FillDirection = Enum.FillDirection.Horizontal
+	currencyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+	currencyLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	currencyLayout.Padding = UDim.new(0, 8)
+
+	local function makeCurrencyBadge(icon: string, colorAccent: Color3, parent: Instance)
+		local frame = Instance.new("Frame", parent)
+		frame.Size = UDim2.new(0, 128, 0, 30)
+		frame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+		frame.BorderSizePixel = 0
+		local fc = Instance.new("UICorner", frame); fc.CornerRadius = UDim.new(0, 6)
+		local stroke = Instance.new("UIStroke", frame)
+		stroke.Color = colorAccent; stroke.Thickness = 1; stroke.Transparency = 0.5
+
+		local iconLabel = Instance.new("TextLabel", frame)
+		iconLabel.Size = UDim2.new(0, 22, 1, 0)
+		iconLabel.Position = UDim2.new(0, 4, 0, 0)
+		iconLabel.BackgroundTransparency = 1
+		iconLabel.Text = icon
+		iconLabel.TextSize = 14
+		iconLabel.Font = Enum.Font.GothamBold
+		iconLabel.TextColor3 = colorAccent
+
+		local valueLabel = Instance.new("TextLabel", frame)
+		valueLabel.Size = UDim2.new(1, -30, 1, 0)
+		valueLabel.Position = UDim2.new(0, 28, 0, 0)
+		valueLabel.BackgroundTransparency = 1
+		valueLabel.TextColor3 = Color3.fromRGB(230, 230, 240)
+		valueLabel.Font = Enum.Font.GothamBold
+		valueLabel.TextSize = 13
+		valueLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+		return valueLabel
+	end
+
+	local coinLabel = makeCurrencyBadge("¥", Color3.fromRGB(255, 200, 50), currencyContainer)
+	local xpLabel = makeCurrencyBadge("⚡", Color3.fromRGB(100, 180, 255), currencyContainer)
+
+	local lastCoins = heroCoinsVal.Value
+	local lastXP = trainingXPVal.Value
+
+	local function updateCurrencies()
+		local newCoins = heroCoinsVal.Value
+		local newXP = trainingXPVal.Value
+
+		if newCoins ~= lastCoins then
+			local diff = newCoins - lastCoins
+			if diff > 0 then showToast("+ ¥" .. diff .. " Hero Coins", Color3.fromRGB(255, 200, 50)) end
+			animateCounter({SetText = function(_, t) coinLabel.Text = t end}, lastCoins, newCoins, "¥ ", "")
+			lastCoins = newCoins
+		end
+
+		if newXP ~= lastXP then
+			local diff = newXP - lastXP
+			if diff > 0 then showToast("+ " .. diff .. " Training XP", Color3.fromRGB(100, 180, 255)) end
+			animateCounter({SetText = function(_, t) xpLabel.Text = t end}, lastXP, newXP, "", " XP")
+			lastXP = newXP
+		end
+	end
+
+	heroCoinsVal.Changed:Connect(updateCurrencies)
+	trainingXPVal.Changed:Connect(updateCurrencies)
+
+	-- Initial values
+	coinLabel.Text = "¥ " .. heroCoinsVal.Value
+	xpLabel.Text = trainingXPVal.Value .. " XP"
+end
+
+-- ==========================================
+-- BUILDER: GACHA SYSTEM (Greatly Enhanced)
+-- ==========================================
+local function BuildGachaSystem()
+	local gachaOverlay = Instance.new("Frame", screenGui)
+	gachaOverlay.Name = "GachaOverlay"
+	gachaOverlay.Size = UDim2.new(1, 0, 1, 0)
+	gachaOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	gachaOverlay.BackgroundTransparency = 1
+	gachaOverlay.Visible = false
+	gachaOverlay.ZIndex = 100
+
+	local blockInput = Instance.new("TextButton", gachaOverlay)
+	blockInput.Size = UDim2.new(1, 0, 1, 0)
+	blockInput.Text = ""; blockInput.BackgroundTransparency = 1; blockInput.ZIndex = 99
+
+	-- Animated star-field background for gacha
+	local starField = Instance.new("Frame", gachaOverlay)
+	starField.Size = UDim2.new(1, 0, 1, 0)
+	starField.BackgroundTransparency = 1
+	starField.ZIndex = 100
+
+	for i = 1, 30 do
+		local star = Instance.new("Frame", starField)
+		star.Size = UDim2.new(0, math.random(2, 5), 0, math.random(2, 5))
+		star.Position = UDim2.new(math.random(0, 100)/100, 0, math.random(0, 100)/100, 0)
+		star.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		star.BorderSizePixel = 0
+		star.BackgroundTransparency = math.random(40, 80) / 100
+		local sc = Instance.new("UICorner", star); sc.CornerRadius = UDim.new(1, 0)
+		-- Twinkle
+		task.spawn(function()
+			while star.Parent do
+				local targetT = math.random(2, 8) / 10
+				TweenService:Create(star, TweenInfo.new(math.random(8, 20)/10, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {BackgroundTransparency = targetT}):Play()
+				task.wait(math.random(15, 30)/10)
+			end
+		end)
+	end
+
+	local gachaContainer = Instance.new("Frame", gachaOverlay)
+	gachaContainer.Size = UDim2.new(0, 700, 0, 260)
+	gachaContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+	gachaContainer.Position = UDim2.new(0.5, 0, 0.5, 0)
+	gachaContainer.BackgroundTransparency = 1
+	gachaContainer.ZIndex = 102
+
+	-- Decorative top lines
+	local lineL = Instance.new("Frame", gachaContainer)
+	lineL.Size = UDim2.new(0.28, 0, 0, 2)
+	lineL.Position = UDim2.new(0, 0, 0, 30)
+	lineL.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+	lineL.BorderSizePixel = 0
+	lineL.BackgroundTransparency = 0.5
+	local lineR = Instance.new("Frame", gachaContainer)
+	lineR.Size = UDim2.new(0.28, 0, 0, 2)
+	lineR.Position = UDim2.new(0.72, 0, 0, 30)
+	lineR.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+	lineR.BorderSizePixel = 0
+	lineR.BackgroundTransparency = 0.5
+
+	local gachaCategoryLabel = UIFramework.UILabel.new("CategoryLabel", gachaContainer)
+	gachaCategoryLabel.Gui.Size = UDim2.new(1, 0, 0, 40)
+	gachaCategoryLabel.Gui.Position = UDim2.new(0, 0, 0, 15)
+	gachaCategoryLabel:SetText("ROLLING...")
+	gachaCategoryLabel.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+	gachaCategoryLabel.Gui.TextSize = 20
+	gachaCategoryLabel.Gui.Font = Enum.Font.GothamBold
+
+
+	local gachaResultLabel = UIFramework.UILabel.new("ResultLabel", gachaContainer)
+	gachaResultLabel.Gui.Size = UDim2.new(1, 0, 0, 90)
+	gachaResultLabel.Gui.Position = UDim2.new(0, 0, 0, 65)
+	gachaResultLabel:SetText("")
+	gachaResultLabel.Gui.TextSize = 54
+	gachaResultLabel.Gui.Font = Enum.Font.GothamBlack
+	local resultStroke = Instance.new("UIStroke", gachaResultLabel.Gui)
+	resultStroke.Thickness = 3
+	resultStroke.Color = Color3.fromRGB(10, 10, 18)
+
+	local gachaRarityLabel = UIFramework.UILabel.new("RarityLabel", gachaContainer)
+	gachaRarityLabel.Gui.Size = UDim2.new(1, 0, 0, 30)
+	gachaRarityLabel.Gui.Position = UDim2.new(0, 0, 0, 160)
+	gachaRarityLabel:SetText("")
+	gachaRarityLabel.Gui.TextSize = 18
+	gachaRarityLabel.Gui.Font = Enum.Font.GothamBold
+
+
+	-- NEW: Rarity aura glow panel behind result
+	local rarityAura = Instance.new("Frame", gachaContainer)
+	rarityAura.Size = UDim2.new(0.9, 0, 0.5, 0)
+	rarityAura.Position = UDim2.new(0.05, 0, 0.18, 0)
+	rarityAura.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	rarityAura.BackgroundTransparency = 1
+	rarityAura.BorderSizePixel = 0
+	rarityAura.ZIndex = 101
+	local auraCorner = Instance.new("UICorner", rarityAura); auraCorner.CornerRadius = UDim.new(0, 16)
+
+	local gachaScale = Instance.new("UIScale", gachaContainer)
+
+	local flashFrame = Instance.new("Frame", gachaOverlay)
+	flashFrame.Size = UDim2.new(1, 0, 1, 0)
+	flashFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	flashFrame.BackgroundTransparency = 1
+	flashFrame.ZIndex = 101
+
+	local function getRandomItem(category: string): string
+		local pool = GachaPools[category]
+		local rarities = {"Trash", "Common", "Uncommon", "Rare", "Elite", "Epic", "Legendary", "Mythic", "Secret"}
+		local r = rarities[math.random(1, #rarities)]
+		if pool[r] and #pool[r] > 0 then return pool[r][math.random(1, #pool[r])] end
+		return "None"
+	end
+
+	local function shakeUI(uiElement: Instance, intensity: number, duration: number)
+		local origPos = uiElement.Position
+		local elapsed = 0
+		local connection
+		connection = RunService.RenderStepped:Connect(function(dt)
+			elapsed += dt
+			if elapsed >= duration then
+				connection:Disconnect()
+				uiElement.Position = origPos
+			else
+				local offsetX = math.random(-intensity, intensity)
+				local offsetY = math.random(-intensity, intensity)
+				uiElement.Position = origPos + UDim2.new(0, offsetX, 0, offsetY)
+			end
+		end)
+	end
+
+	shared_playGachaAnimation = function(category: string, finalItem: string, onComplete)
+		shared_isRollingActive = true
+		gachaOverlay.Visible = true
+		gachaCategoryLabel:SetText("ROLLING " .. string.upper(category) .. "...")
+		gachaRarityLabel:SetText("")
+		gachaScale.Scale = 1
+		rarityAura.BackgroundTransparency = 1
+
+		TweenService:Create(gachaOverlay, TweenInfo.new(0.3), {BackgroundTransparency = 0.15}):Play()
+
+		-- Faster spin-up with acceleration
+		for i = 1, 18 do
+			local randomItem = getRandomItem(category)
+			local randomRarity = getRarity(category, randomItem)
+			gachaResultLabel:SetText(randomItem)
+			gachaResultLabel.Gui.TextColor3 = RarityColors[randomRarity]
+
+			gachaScale.Scale = 0.96
+			TweenService:Create(gachaScale, TweenInfo.new(0.04, Enum.EasingStyle.Sine), {Scale = 1.04}):Play()
+			task.wait(0.04 + (i * 0.004))
+		end
+
+		local finalRarity = getRarity(category, finalItem)
+		local rColor = RarityColors[finalRarity]
+
+		-- Show aura glow
+		rarityAura.BackgroundColor3 = rColor
+		TweenService:Create(rarityAura, TweenInfo.new(0.4), {BackgroundTransparency = 0.75}):Play()
+
+		gachaCategoryLabel:SetText("◆ NEW " .. string.upper(category) .. " ◆")
+		gachaResultLabel:SetText(string.upper(finalItem))
+		gachaResultLabel.Gui.TextColor3 = rColor
+		resultStroke.Color = rColor == Color3.fromRGB(255, 255, 255) and Color3.fromRGB(50, 50, 50) or Color3.fromRGB(10, 10, 18)
+		gachaRarityLabel:SetText("• " .. string.upper(finalRarity) .. " •")
+		gachaRarityLabel.Gui.TextColor3 = rColor
+
+		lineL.BackgroundColor3 = rColor
+		lineR.BackgroundColor3 = rColor
+
+		local impactLevel = 0
+		if finalRarity == "Secret" or finalRarity == "Mythic" or finalRarity == "Legendary" then impactLevel = 3
+		elseif finalRarity == "Epic" or finalRarity == "Elite" then impactLevel = 2
+		elseif finalRarity == "Rare" or finalRarity == "Uncommon" then impactLevel = 1 end
+
+		if impactLevel == 3 then
+			-- Multi-flash effect
+			for _ = 1, 3 do
+				flashFrame.BackgroundColor3 = rColor
+				flashFrame.BackgroundTransparency = 0.2
+				TweenService:Create(flashFrame, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {BackgroundTransparency = 0.9}):Play()
+				task.wait(0.35)
+			end
+			gachaScale.Scale = 1.7
+			TweenService:Create(gachaScale, TweenInfo.new(0.7, Enum.EasingStyle.Bounce), {Scale = 1}):Play()
+			shakeUI(gachaContainer, 22, 0.9)
+			showToast("🌟 " .. finalRarity:upper() .. "! " .. finalItem, rColor, 5)
+			task.wait(4)
+		elseif impactLevel == 2 then
+			flashFrame.BackgroundColor3 = rColor
+			flashFrame.BackgroundTransparency = 0.4
+			TweenService:Create(flashFrame, TweenInfo.new(0.7), {BackgroundTransparency = 1}):Play()
+			gachaScale.Scale = 1.35
+			TweenService:Create(gachaScale, TweenInfo.new(0.45, Enum.EasingStyle.Bounce), {Scale = 1}):Play()
+			shakeUI(gachaContainer, 10, 0.5)
+			showToast("✨ " .. finalRarity:upper() .. "! " .. finalItem, rColor, 3.5)
+			task.wait(3)
+		elseif impactLevel == 1 then
+			gachaScale.Scale = 1.18
+			TweenService:Create(gachaScale, TweenInfo.new(0.35, Enum.EasingStyle.Back), {Scale = 1}):Play()
+			task.wait(2.2)
+		else
+			gachaScale.Scale = 1.06
+			TweenService:Create(gachaScale, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {Scale = 1}):Play()
+			task.wait(1.8)
+		end
+
+		TweenService:Create(gachaOverlay, TweenInfo.new(0.35), {BackgroundTransparency = 1}):Play()
+		TweenService:Create(gachaScale, TweenInfo.new(0.3), {Scale = 0.8}):Play()
+		TweenService:Create(rarityAura, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+		task.wait(0.35)
+
+		lineL.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+		lineR.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+		gachaOverlay.Visible = false
+		shared_isRollingActive = false
+		if onComplete then onComplete() end
+	end
+end
+
+-- ==========================================
+-- BUILDER: HOME PAGE
+-- ==========================================
+local function BuildHomePage()
+	local homePage = pages["HOME"]
+
+	local homeLayout = Instance.new("UIListLayout", homePage)
+	homeLayout.FillDirection = Enum.FillDirection.Horizontal
+	homeLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	homeLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	homeLayout.Padding = UDim.new(0, 20)
+
+	local homeLeftContainer = Instance.new("Frame", homePage)
+	homeLeftContainer.Name = "LeftContainer"
+	homeLeftContainer.Size = UDim2.new(0, 380, 0, 500)
+	homeLeftContainer.BackgroundTransparency = 1
+
+	local homeLeftLayout = Instance.new("UIListLayout", homeLeftContainer)
+	homeLeftLayout.Padding = UDim.new(0, 20)
+	homeLeftLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	homeLeftLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+
+	local UA_MAIN = Color3.fromRGB(115, 195, 235)
+	local UA_DARK = Color3.fromRGB(22, 30, 52)
+	local UA_GOLD = Color3.fromRGB(240, 210, 50)
+
+	-- Enhanced ID Card
+	local idCardPanel = UIFramework.UIFrame.new("IDCard", Theme.Colors.Background, homeLeftContainer)
+	idCardPanel.Gui.Size = UDim2.new(1, 0, 0, 225)
+	idCardPanel.Gui.ClipsDescendants = true
+
+	-- Holographic shimmer animation
+	local shimmerFrame = Instance.new("Frame", idCardPanel.Gui)
+	shimmerFrame.Size = UDim2.new(0, 60, 2, 0)
+	shimmerFrame.Position = UDim2.new(-0.2, 0, -0.5, 0)
+	shimmerFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	shimmerFrame.BackgroundTransparency = 0.88
+	shimmerFrame.BorderSizePixel = 0
+	shimmerFrame.Rotation = 25
+	shimmerFrame.ZIndex = 5
+
+	task.spawn(function()
+		while idCardPanel.Gui.Parent do
+			TweenService:Create(shimmerFrame, TweenInfo.new(2.5, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {Position = UDim2.new(1.3, 0, -0.5, 0)}):Play()
+			task.wait(3.5)
+			shimmerFrame.Position = UDim2.new(-0.2, 0, -0.5, 0)
+			task.wait(1)
+		end
+	end)
+
+	local idStripes = Instance.new("ImageLabel", idCardPanel.Gui)
+	idStripes.Size = UDim2.new(1, 0, 1, 0)
+	idStripes.Image = "rbxassetid://16766440266"
+	idStripes.ImageColor3 = UA_MAIN
+	idStripes.ImageTransparency = 0.85
+	idStripes.BackgroundTransparency = 1
+
+	local idHeader = Instance.new("Frame", idStripes)
+	idHeader.Size = UDim2.new(1, 0, 0, 38)
+	idHeader.BackgroundColor3 = UA_DARK
+	idHeader.BorderSizePixel = 0
+
+	local uaLogo = UIFramework.UILabel.new("Logo", idHeader)
+	uaLogo.Gui.Size = UDim2.new(0.2, 0, 1, 0)
+	uaLogo:SetText("[UA]")
+	uaLogo.Gui.TextColor3 = UA_GOLD
+	uaLogo.Gui.Font = Enum.Font.GothamBlack
+	uaLogo.Gui.TextSize = 15
+
+	local schoolText = UIFramework.UILabel.new("School", idHeader)
+	schoolText.Gui.Size = UDim2.new(0.5, 0, 1, 0)
+	schoolText.Gui.Position = UDim2.new(0.2, 0, 0, 0)
+	schoolText:SetText("YUUEI HIGH SCHOOL")
+	schoolText.Gui.TextSize = 13; schoolText.Gui.TextScaled = false
+
+	local idText = UIFramework.UILabel.new("IDText", idHeader)
+	idText.Gui.Size = UDim2.new(0.3, 0, 1, 0)
+	idText.Gui.Position = UDim2.new(0.7, 0, 0, 0)
+	idText:SetText("STUDENT ID")
+	idText.Gui.TextSize = 11; idText.Gui.TextScaled = false
+	idText.Gui.TextColor3 = Theme.Colors.TextMuted
+
+	local photoFrame = Instance.new("Frame", idStripes)
+	photoFrame.Size = UDim2.new(0, 100, 0, 120)
+	photoFrame.Position = UDim2.new(0, 15, 0, 52)
+	photoFrame.BackgroundColor3 = UA_DARK
+	local photoCorner = Instance.new("UICorner", photoFrame); photoCorner.CornerRadius = UDim.new(0, 8)
+	local photoStroke = Instance.new("UIStroke", photoFrame); photoStroke.Color = UA_MAIN; photoStroke.Thickness = 2; photoStroke.Transparency = 0.5
+
+	local avatar = UIFramework.UIImage.new("Avatar", photoFrame)
+	avatar.Gui.Size = UDim2.new(1, 0, 1, 0)
+	avatar.Gui.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. player.UserId .. "&width=150&height=150&format=png"
+
+	local dataContainer = Instance.new("Frame", idStripes)
+	dataContainer.Size = UDim2.new(1, -145, 0, 120)
+	dataContainer.Position = UDim2.new(0, 130, 0, 52)
+	dataContainer.BackgroundTransparency = 1
+
+	local dataLayout = Instance.new("UIListLayout", dataContainer)
+	dataLayout.Padding = UDim.new(0, 5)
+
+	local function createIDRow(label: string): TextLabel
+		local row = Instance.new("Frame", dataContainer)
+		row.Size = UDim2.new(1, 0, 0, 20)
+		row.BackgroundTransparency = 1
+
+		local title = UIFramework.UILabel.new("Title", row)
+		title.Gui.Size = UDim2.new(0.3, 0, 1, 0)
+		title:SetText(label)
+		title.Gui.TextColor3 = UA_DARK
+		title.Gui.Font = Enum.Font.GothamBold
+		title.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		title.Gui.TextSize = 12; title.Gui.TextScaled = false
+
+		local data = UIFramework.UILabel.new("Data", row)
+		data.Gui.Size = UDim2.new(0.7, 0, 1, 0)
+		data.Gui.Position = UDim2.new(0.3, 0, 0, 0)
+		data.Gui.TextColor3 = UA_DARK
+		data.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		data.Gui.TextSize = 12; data.Gui.TextScaled = false
+		return data.Gui
+	end
+
+	local gradeData = createIDRow("Grade:")
+	local quirkData = createIDRow("Quirk:")
+	local nameData = createIDRow("Name:")
+	nameData.Text = string.upper(player.Name)
+
+	local stamp = UIFramework.UILabel.new("Stamp", dataContainer)
+	stamp.Gui.Size = UDim2.new(1, 0, 0, 30)
+	stamp:SetText("[ U.A. OFFICIAL ]")
+	stamp.Gui.TextColor3 = Color3.fromRGB(200, 40, 40)
+	stamp.Gui.Font = Enum.Font.GothamBlack
+	stamp.Gui.TextXAlignment = Enum.TextXAlignment.Right
+	stamp.Gui.TextSize = 12; stamp.Gui.TextScaled = false
+
+	local function updateIDCard()
+		quirkData.Text = string.upper(quirkVal.Value)
+		quirkData.TextColor3 = RarityColors[getRarity("Quirk", quirkVal.Value)]
+
+		if rebirthsVal.Value == 0 then gradeData.Text = "U.A. TRAINEE"
+		elseif rebirthsVal.Value < 5 then gradeData.Text = "CLASS 1-A"
+		else gradeData.Text = "PRO HERO" end
+	end
+	quirkVal.Changed:Connect(updateIDCard)
+	rebirthsVal.Changed:Connect(updateIDCard)
+	updateIDCard()
+
+	local objPanel = UIFramework.UIFrame.new("ObjectivePanel", Theme.Colors.Panel, homeLeftContainer)
+	objPanel.Gui.Size = UDim2.new(1, 0, 0, 110)
+
+	local objPadding = Instance.new("UIPadding", objPanel.Gui)
+	objPadding.PaddingTop = UDim.new(0, 12); objPadding.PaddingLeft = UDim.new(0, 15); objPadding.PaddingRight = UDim.new(0, 15)
+
+	-- Blinking objective indicator dot
+	local activeDot = Instance.new("Frame", objPanel.Gui)
+	activeDot.Size = UDim2.new(0, 8, 0, 8)
+	activeDot.Position = UDim2.new(0, -2, 0, 6)
+	activeDot.BackgroundColor3 = Color3.fromRGB(80, 220, 100)
+	activeDot.BorderSizePixel = 0
+	local dotCorner = Instance.new("UICorner", activeDot); dotCorner.CornerRadius = UDim.new(1, 0)
+	task.spawn(function()
+		while activeDot.Parent do
+			TweenService:Create(activeDot, TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {BackgroundTransparency = 0.7}):Play()
+			task.wait(2)
+		end
+	end)
+
+	local directiveTitle = UIFramework.UILabel.new("DirectiveTitle", objPanel.Gui)
+	directiveTitle.Gui.Size = UDim2.new(1, 0, 0, 18)
+	directiveTitle:SetText("CURRENT DIRECTIVE")
+	directiveTitle.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+	directiveTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	directiveTitle.Gui.Font = Enum.Font.GothamBold
+	directiveTitle.Gui.TextSize = 11
+
+	local objectiveLabel = UIFramework.UILabel.new("Objective", objPanel.Gui)
+	objectiveLabel.Gui.Size = UDim2.new(1, 0, 0, 55)
+	objectiveLabel.Gui.Position = UDim2.new(0, 0, 0, 26)
+	objectiveLabel:SetText("Clear Zone 1 (U.A. Entrance Exam) to advance.")
+	objectiveLabel.Gui.TextColor3 = Theme.Colors.ObjectiveText
+	objectiveLabel.Gui.TextWrapped = true
+	objectiveLabel.Gui.Font = Enum.Font.Gotham
+	objectiveLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	-- Side Hustles
+	local hustlesScroll = UIFramework.UIScrollFrame.new("HustlesList", Theme.Colors.Panel, homePage)
+	hustlesScroll.Gui.Size = UDim2.new(0, 450, 0, 500)
+
+	local hustlePadding = Instance.new("UIPadding", hustlesScroll.Gui)
+	hustlePadding.PaddingTop = UDim.new(0, 15); hustlePadding.PaddingLeft = UDim.new(0, 15); hustlePadding.PaddingRight = UDim.new(0, 15)
+
+	local hustleLayout = Instance.new("UIListLayout", hustlesScroll.Gui)
+	hustleLayout.Padding = UDim.new(0, 10)
+	hustleLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local hustleTitle = UIFramework.UILabel.new("HustleTitle", hustlesScroll.Gui)
+	hustleTitle.Gui.Size = UDim2.new(1, 0, 0, 20)
+	hustleTitle.Gui.LayoutOrder = 0
+	hustleTitle:SetText("SIDE HUSTLES  •  HERO COINS")
+	hustleTitle.Gui.TextColor3 = Color3.fromRGB(255, 200, 50)
+	hustleTitle.Gui.Font = Enum.Font.GothamBold
+	hustleTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	local function createHustleBlock(taskName: string, rewardText: string, isLocked: boolean, reqText: string, order: number)
+		local block = UIFramework.UIFrame.new("Hustle_"..taskName, Theme.Colors.Background, hustlesScroll.Gui)
+		block.Gui.Size = UDim2.new(1, 0, 0, 80)
+		block.Gui.LayoutOrder = order
+
+		-- Left accent stripe based on active status
+		local accentBar = Instance.new("Frame", block.Gui)
+		accentBar.Size = UDim2.new(0, 3, 1, 0)
+		accentBar.BackgroundColor3 = isLocked and Color3.fromRGB(80, 80, 90) or Color3.fromRGB(255, 200, 50)
+		accentBar.BorderSizePixel = 0
+		local abCorner = Instance.new("UICorner", accentBar); abCorner.CornerRadius = UDim.new(0, 4)
+
+		local nameLabel = UIFramework.UILabel.new("Name", block.Gui)
+		nameLabel.Gui.Size = UDim2.new(0.5, 0, 0, 20)
+		nameLabel.Gui.Position = UDim2.new(0, 14, 0, 10)
+		nameLabel:SetText(taskName)
+		nameLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		nameLabel.Gui.Font = Enum.Font.GothamBold
+		nameLabel.Gui.TextColor3 = isLocked and Theme.Colors.LockedText or Theme.Colors.PrimaryText
+
+		local rewardLabel = UIFramework.UILabel.new("Rewards", block.Gui)
+		rewardLabel.Gui.Size = UDim2.new(0.4, 0, 0, 20)
+		rewardLabel.Gui.Position = UDim2.new(0.55, 0, 0, 10)
+		rewardLabel:SetText(rewardText)
+		rewardLabel.Gui.TextColor3 = isLocked and Theme.Colors.LockedText or Color3.fromRGB(255, 200, 50)
+		rewardLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		rewardLabel.Gui.Font = Enum.Font.GothamBold
+
+		if isLocked then
+			local lockLabel = UIFramework.UILabel.new("Locked", block.Gui)
+			lockLabel.Gui.Size = UDim2.new(0.85, 0, 0, 20)
+			lockLabel.Gui.Position = UDim2.new(0, 14, 0, 48)
+			lockLabel:SetText("🔒 " .. reqText)
+			lockLabel.Gui.TextColor3 = Theme.Colors.LockedText
+			lockLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+			lockLabel.Gui.Font = Enum.Font.Gotham
+			lockLabel.Gui.TextSize = 12
+		else
+			local pBar = UIFramework.UIProgressBar.new("ProgressBar", block.Gui)
+			pBar.Gui.Size = UDim2.new(0.58, 0, 0, 12)
+			pBar.Gui.Position = UDim2.new(0, 14, 0, 50)
+
+			local actionBtn = UIFramework.UIButton.new("ActionBtn", "START", Theme.Colors.PanelHighlight, block.Gui)
+			actionBtn.Gui.Size = UDim2.new(0.22, 0, 0, 26)
+			actionBtn.Gui.Position = UDim2.new(0.75, 0, 0, 42)
+			actionBtn.Gui.Font = Enum.Font.GothamBold
+			actionBtn.Gui.TextSize = 12
+			applyHoverEffect(actionBtn.Gui, 1.06, 15)
+
+			RunService.RenderStepped:Connect(function()
+				if activeTask.Value == taskName then
+					actionBtn:SetText("STOP")
+					actionBtn.Gui.TextColor3 = Color3.fromRGB(255, 80, 80)
+					accentBar.BackgroundColor3 = Color3.fromRGB(80, 220, 100)
+					local progress = (os.clock() % 6) / 6
+					pBar:SetProgress(progress)
+				else
+					actionBtn:SetText("START")
+					actionBtn.Gui.TextColor3 = Theme.Colors.Text
+					accentBar.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
+					pBar:SetProgress(0)
+				end
+			end)
+
+			actionBtn:OnClick(function()
+				if activeTask.Value == taskName then ChangeTaskEvent:FireServer("None")
+				else
+					ChangeTaskEvent:FireServer(taskName)
+					showToast("▶ Started: " .. taskName, Color3.fromRGB(255, 200, 50))
+				end
+			end)
+		end
+	end
+
+	createHustleBlock("Cleaning Beach", "+10 Coins/min", false, "", 1)
+	createHustleBlock("Campus Patrol", "+50 Coins/min", false, "", 2)
+	createHustleBlock("Agency Desk", "+200 Coins/min", true, "Requires: Pass Entrance Exam", 3)
+	createHustleBlock("TV Commercial", "+800 Coins/min", true, "Requires: Sports Fest Winner", 4)
+	createHustleBlock("Night Patrol", "+2,500 Coins/min", true, "Requires: Prov. License", 5)
+end
+
+-- ==========================================
+-- BUILDER: HERO SET PAGE
+-- ==========================================
+local function BuildHeroSetPage()
+	local heroSetPage = pages["HERO SET"]
+
+	local heroSetLayout = Instance.new("UIListLayout", heroSetPage)
+	heroSetLayout.FillDirection = Enum.FillDirection.Horizontal
+	heroSetLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	heroSetLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	heroSetLayout.Padding = UDim.new(0, 20)
+
+	local leftPanel = UIFramework.UIFrame.new("ProfilePanel", Theme.Colors.Panel, heroSetPage)
+	leftPanel.Gui.Size = UDim2.new(0, 350, 0, 500)
+
+	local leftPadding = Instance.new("UIPadding", leftPanel.Gui)
+	leftPadding.PaddingTop = UDim.new(0, 20); leftPadding.PaddingLeft = UDim.new(0, 20)
+	leftPadding.PaddingRight = UDim.new(0, 20); leftPadding.PaddingBottom = UDim.new(0, 20)
+
+	local topContent = Instance.new("Frame", leftPanel.Gui)
+	topContent.Name = "TopContent"
+	topContent.Size = UDim2.new(1, 0, 1, -50)
+	topContent.BackgroundTransparency = 1
+
+	local topContentLayout = Instance.new("UIListLayout", topContent)
+	topContentLayout.Padding = UDim.new(0, 14)
+
+	local headerFrame = Instance.new("Frame", topContent)
+	headerFrame.Size = UDim2.new(1, 0, 0, 62)
+	headerFrame.BackgroundTransparency = 1
+
+	local profileAvatar = UIFramework.UIImage.new("Avatar", headerFrame)
+	profileAvatar.Gui.Size = UDim2.new(0, 60, 0, 60)
+	profileAvatar.Gui.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. player.UserId .. "&width=150&height=150&format=png"
+	local avCorner = Instance.new("UICorner", profileAvatar.Gui); avCorner.CornerRadius = UDim.new(0, 8)
+	local avStroke = Instance.new("UIStroke", profileAvatar.Gui); avStroke.Color = Color3.fromRGB(115, 195, 235); avStroke.Thickness = 2
+
+	local nameLabel = UIFramework.UILabel.new("Name", headerFrame)
+	nameLabel.Gui.Size = UDim2.new(1, -75, 0, 30)
+	nameLabel.Gui.Position = UDim2.new(0, 75, 0, 0)
+	nameLabel:SetText(string.upper(player.Name))
+	nameLabel.Gui.TextColor3 = Theme.Colors.PrimaryText
+	nameLabel.Gui.Font = Enum.Font.GothamBlack
+	nameLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	local gradeLabel = UIFramework.UILabel.new("Grade", headerFrame)
+	gradeLabel.Gui.Size = UDim2.new(1, -75, 0, 20)
+	gradeLabel.Gui.Position = UDim2.new(0, 75, 0, 32)
+	gradeLabel:SetText("Grade: U.A. Trainee")
+	gradeLabel.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+	gradeLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	gradeLabel.Gui.Font = Enum.Font.Gotham
+	gradeLabel.Gui.TextSize = 13
+
+	-- Genetics separator label
+	local divider = Instance.new("Frame", topContent)
+	divider.Size = UDim2.new(1, 0, 0, 1)
+	divider.BackgroundColor3 = Color3.fromRGB(50, 55, 70)
+	divider.BorderSizePixel = 0
+
+	local geneticsLabel = UIFramework.UILabel.new("GeneticsTitle", topContent)
+	geneticsLabel.Gui.Size = UDim2.new(1, 0, 0, 18)
+	geneticsLabel:SetText("INNATE GENETICS")
+	geneticsLabel.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+	geneticsLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	geneticsLabel.Gui.Font = Enum.Font.GothamBold
+	geneticsLabel.Gui.TextSize = 11
+
+	local function createGeneticRow(category: string)
+		local row = Instance.new("Frame", topContent)
+		row.Size = UDim2.new(1, 0, 0, 32)
+		row.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+		row.BorderSizePixel = 0
+		local rc = Instance.new("UICorner", row); rc.CornerRadius = UDim.new(0, 6)
+		local rp = Instance.new("UIPadding", row); rp.PaddingLeft = UDim.new(0, 10); rp.PaddingRight = UDim.new(0, 8)
+
+		local textLabel = UIFramework.UILabel.new(category.."Text", row)
+		textLabel.Gui.Size = UDim2.new(0.62, 0, 1, 0)
+		textLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		textLabel.Gui.Font = Enum.Font.GothamBold
+		textLabel.Gui.TextSize = 13
+
+		local rollBtn = UIFramework.UIButton.new("Roll"..category, "ROLL", Theme.Colors.PanelHighlight, row)
+		rollBtn.Gui.Size = UDim2.new(0.33, 0, 0.75, 0)
+		rollBtn.Gui.AnchorPoint = Vector2.new(1, 0.5)
+		rollBtn.Gui.Position = UDim2.new(1, 0, 0.5, 0)
+		rollBtn.Gui.Font = Enum.Font.GothamBold
+		rollBtn.Gui.TextSize = 12
+		applyHoverEffect(rollBtn.Gui, 1.06, 18)
+
+		rollBtn:OnClick(function()
+			if shared_isRollingActive then return end
+			shared_isRollingCategory[category] = true
+			RollGachaEvent:FireServer(category)
+		end)
+
+		return textLabel
+	end
+
+	local quirkText = createGeneticRow("Quirk")
+	local traitText = createGeneticRow("Trait")
+	local styleText = createGeneticRow("Style")
+
+	local function bindGeneticText(uiLabel: any, valueName: string, prefix: string, category: string)
+		local stringVal = statsFolder:WaitForChild(valueName) :: StringValue
+		local isFirstLoad = true
+
+		local function updateVisuals()
+			local itemName = stringVal.Value
+			if isFirstLoad then
+				local rarity = getRarity(category, itemName)
+				uiLabel:SetText(prefix .. ": " .. itemName)
+				uiLabel.Gui.TextColor3 = RarityColors[rarity]
+				isFirstLoad = false
+			elseif shared_isRollingCategory[category] then
+				shared_isRollingCategory[category] = false
+				if shared_playGachaAnimation then
+					shared_playGachaAnimation(category, itemName, function()
+						local rarity = getRarity(category, itemName)
+						uiLabel:SetText(prefix .. ": " .. itemName)
+						uiLabel.Gui.TextColor3 = RarityColors[rarity]
+					end)
+				end
+			else
+				local rarity = getRarity(category, itemName)
+				uiLabel:SetText(prefix .. ": " .. itemName)
+				uiLabel.Gui.TextColor3 = RarityColors[rarity]
+			end
+		end
+
+		stringVal.Changed:Connect(updateVisuals)
+		updateVisuals()
+	end
+
+	bindGeneticText(quirkText, "CurrentQuirk", "Quirk", "Quirk")
+	bindGeneticText(traitText, "CurrentTrait", "Trait", "Trait")
+	bindGeneticText(styleText, "CurrentStyle", "Style", "Style")
+
+	local spinsLabel = UIFramework.UILabel.new("SpinsCount", topContent)
+	spinsLabel.Gui.Size = UDim2.new(1, 0, 0, 18)
+	spinsLabel:SetText("Spins Available: 0")
+	spinsLabel.Gui.TextColor3 = Color3.fromRGB(255, 200, 50)
+	spinsLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	spinsLabel.Gui.Font = Enum.Font.GothamBold
+	spinsLabel.Gui.TextSize = 13
+
+	spinsVal.Changed:Connect(function()
+		spinsLabel:SetText("Spins Available: " .. spinsVal.Value)
+		if spinsVal.Value > 0 then
+			showToast("🎰 You have " .. spinsVal.Value .. " spin(s)!", Color3.fromRGB(255, 200, 50))
+		end
+	end)
+
+	local rebirthBtn = UIFramework.UIButton.new("RebirthBtn", "⚡ REBIRTH  (REQ: LVL 100)", Theme.Colors.Background, leftPanel.Gui)
+	rebirthBtn.Gui.Size = UDim2.new(1, 0, 0, 42)
+	rebirthBtn.Gui.AnchorPoint = Vector2.new(0, 1)
+	rebirthBtn.Gui.Position = UDim2.new(0, 0, 1, 0)
+	rebirthBtn.Gui.Font = Enum.Font.GothamBold
+	rebirthBtn.Gui.TextSize = 13
+	local rbStroke = Instance.new("UIStroke", rebirthBtn.Gui)
+	rbStroke.Color = Color3.fromRGB(255, 180, 50); rbStroke.Thickness = 1; rbStroke.Transparency = 0.4
+	applyHoverEffect(rebirthBtn.Gui, 1.03, 12)
+
+	rebirthBtn:OnClick(function()
+		openRebirthModal()
+	end)
+
+	local rightScroll = UIFramework.UIScrollFrame.new("StatsList", Theme.Colors.Panel, heroSetPage)
+	rightScroll.Gui.Size = UDim2.new(0, 450, 0, 500)
+
+	local rightPadding = Instance.new("UIPadding", rightScroll.Gui)
+	rightPadding.PaddingTop = UDim.new(0, 15); rightPadding.PaddingLeft = UDim.new(0, 15); rightPadding.PaddingRight = UDim.new(0, 15)
+
+	local rightLayout = Instance.new("UIListLayout", rightScroll.Gui)
+	rightLayout.Padding = UDim.new(0, 10)
+	rightLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	-- Stats header
+	local statsHeader = UIFramework.UILabel.new("StatsTitle", rightScroll.Gui)
+	statsHeader.Gui.Size = UDim2.new(1, 0, 0, 18)
+	statsHeader.Gui.LayoutOrder = 0
+	statsHeader:SetText("HERO STATS  •  TRAINING XP TO UPGRADE")
+	statsHeader.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+	statsHeader.Gui.Font = Enum.Font.GothamBold
+	statsHeader.Gui.TextSize = 11
+	statsHeader.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	local statIcons = {Strength = "💪", Agility = "⚡", Endurance = "🛡", Intelligence = "🧠", QuirkFactor = "✨"}
+
+	local function createStatBlock(statName: string, desc: string, order: number)
+		local block = UIFramework.UIFrame.new("Stat_"..statName, Theme.Colors.Background, rightScroll.Gui)
+		block.Gui.Size = UDim2.new(1, 0, 0, 82)
+		block.Gui.LayoutOrder = order
+
+		local leftAccent = Instance.new("Frame", block.Gui)
+		leftAccent.Size = UDim2.new(0, 3, 0.7, 0)
+		leftAccent.AnchorPoint = Vector2.new(0, 0.5)
+		leftAccent.Position = UDim2.new(0, 0, 0.5, 0)
+		leftAccent.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+		leftAccent.BorderSizePixel = 0
+		local lacCorner = Instance.new("UICorner", leftAccent); lacCorner.CornerRadius = UDim.new(0, 4)
+
+		local icon = Instance.new("TextLabel", block.Gui)
+		icon.Size = UDim2.new(0, 24, 0, 24)
+		icon.Position = UDim2.new(0, 12, 0, 10)
+		icon.BackgroundTransparency = 1
+		icon.Text = statIcons[statName] or "•"
+		icon.TextSize = 16
+		icon.Font = Enum.Font.GothamBold
+
+		local title = UIFramework.UILabel.new("Title", block.Gui)
+		title.Gui.Size = UDim2.new(0.5, 0, 0, 25)
+		title.Gui.Position = UDim2.new(0, 40, 0, 10)
+		title:SetText(statName)
+		title.Gui.Font = Enum.Font.GothamBold
+		title.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+		local descLabel = UIFramework.UILabel.new("Desc", block.Gui)
+		descLabel.Gui.Size = UDim2.new(0.6, 0, 0, 18)
+		descLabel.Gui.Position = UDim2.new(0, 40, 0, 42)
+		descLabel:SetText(desc)
+		descLabel.Gui.TextColor3 = Theme.Colors.TextMuted
+		descLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		descLabel.Gui.Font = Enum.Font.Gotham
+		descLabel.Gui.TextSize = 12
+
+		local lvlLabel = UIFramework.UILabel.new("Lvl", block.Gui)
+		lvlLabel.Gui.Size = UDim2.new(0.4, 0, 0, 22)
+		lvlLabel.Gui.Position = UDim2.new(0.55, 0, 0, 10)
+		lvlLabel:SetText("Lvl. 1")
+		lvlLabel.Gui.TextColor3 = Color3.fromRGB(255, 200, 50)
+		lvlLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		lvlLabel.Gui.Font = Enum.Font.GothamBold
+		lvlLabel.Gui.TextSize = 14
+
+		local upgBtn = UIFramework.UIButton.new("UpgBtn", "UPGRADE", Theme.Colors.PanelHighlight, block.Gui)
+		upgBtn.Gui.Size = UDim2.new(0.32, 0, 0, 28)
+		upgBtn.Gui.Position = UDim2.new(0.65, 0, 0, 40)
+		upgBtn.Gui.Font = Enum.Font.GothamBold
+		upgBtn.Gui.TextSize = 12
+		applyHoverEffect(upgBtn.Gui, 1.06, 15)
+
+		local statVal = statsFolder:WaitForChild(statName) :: IntValue
+
+		local function updateVisuals()
+			local percentVal = (statVal.Value - 1) * 15
+			if statVal.Value == 1 then
+				lvlLabel:SetText("Lvl. " .. statVal.Value)
+			else
+				lvlLabel:SetText("Lvl. " .. statVal.Value .. " (+" .. percentVal .. "%)")
+			end
+
+			local cost = statVal.Value * 10
+			if trainingXPVal.Value >= cost then
+				upgBtn:SetText("UPGRADE (" .. cost .. " XP)")
+				upgBtn.Gui.TextColor3 = Theme.Colors.PrimaryText
+				upgBtn.Gui.BackgroundColor3 = Theme.Colors.PanelHighlight
+			else
+				upgBtn:SetText("NEED " .. cost .. " XP")
+				upgBtn.Gui.TextColor3 = Theme.Colors.LockedText
+				upgBtn.Gui.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+			end
+		end
+
+		statVal.Changed:Connect(function()
+			updateVisuals()
+			showToast("📈 " .. statName .. " upgraded to Lvl. " .. statVal.Value .. "!", Color3.fromRGB(115, 195, 235))
+		end)
+		trainingXPVal.Changed:Connect(updateVisuals)
+		updateVisuals()
+
+		upgBtn:OnClick(function() UpgradeStatEvent:FireServer(statName) end)
+	end
+
+	createStatBlock("Strength", "Increases Physical damage.", 1)
+	createStatBlock("Agility", "Increases Turn Priority and Dodge.", 2)
+	createStatBlock("Endurance", "Increases Max HP and Armor.", 3)
+	createStatBlock("Intelligence", "Reduces Cooldowns.", 4)
+	createStatBlock("QuirkFactor", "Boosts Quirk damage and effects.", 5)
+end
+
+-- ==========================================
+-- BUILDER: MISSIONS PAGE
+-- ==========================================
+local function BuildMissionsPage()
+	local missionsPage = pages["MISSIONS"]
+
+	local missionsLayout = Instance.new("UIListLayout", missionsPage)
+	missionsLayout.FillDirection = Enum.FillDirection.Horizontal
+	missionsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	missionsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	missionsLayout.Padding = UDim.new(0, 20)
+
+	local missionsLeftPanel = Instance.new("Frame", missionsPage)
+	missionsLeftPanel.Name = "LeftContainer"
+	missionsLeftPanel.Size = UDim2.new(0, 380, 0, 500)
+	missionsLeftPanel.BackgroundTransparency = 1
+
+	local leftMissionsLayout = Instance.new("UIListLayout", missionsLeftPanel)
+	leftMissionsLayout.Padding = UDim.new(0, 15)
+	leftMissionsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local storyBanner = UIFramework.UIFrame.new("StoryBanner", Theme.Colors.Panel, missionsLeftPanel)
+	storyBanner.Gui.Size = UDim2.new(1, 0, 0, 120)
+	storyBanner.Gui.LayoutOrder = 1
+	storyBanner.Gui.ClipsDescendants = true
+
+	local storyImage = Instance.new("ImageLabel", storyBanner.Gui)
+	storyImage.Size = UDim2.new(1, 0, 1, 0)
+	storyImage.Image = "rbxassetid://10654202353"
+	storyImage.ImageColor3 = Color3.fromRGB(80, 80, 90)
+	storyImage.ScaleType = Enum.ScaleType.Crop
+	storyImage.BackgroundTransparency = 1
+
+	-- Gradient overlay for better text readability
+	local storyGrad = Instance.new("Frame", storyBanner.Gui)
+	storyGrad.Size = UDim2.new(1, 0, 1, 0)
+	storyGrad.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
+	storyGrad.BackgroundTransparency = 0.3
+	storyGrad.BorderSizePixel = 0
+
+	local storyTitle = UIFramework.UILabel.new("StoryTitle", storyBanner.Gui)
+	storyTitle.Gui.Size = UDim2.new(1, -20, 0, 40)
+	storyTitle.Gui.Position = UDim2.new(0, 15, 0, 12)
+	storyTitle:SetText("STORY MODE")
+	storyTitle.Gui.TextColor3 = Color3.fromRGB(255, 255, 255)
+	storyTitle.Gui.Font = Enum.Font.GothamBlack
+	storyTitle.Gui.TextSize = 24
+	storyTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	storyTitle.Gui.TextStrokeTransparency = 0.5
+
+	local storyDesc = UIFramework.UILabel.new("StoryDesc", storyBanner.Gui)
+	storyDesc.Gui.Size = UDim2.new(1, -20, 0, 20)
+	storyDesc.Gui.Position = UDim2.new(0, 15, 0, 52)
+	storyDesc:SetText("Progress through the narrative and battle bosses.")
+	storyDesc.Gui.TextColor3 = Color3.fromRGB(180, 190, 210)
+	storyDesc.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	storyDesc.Gui.TextStrokeTransparency = 0.5
+	storyDesc.Gui.Font = Enum.Font.Gotham
+	storyDesc.Gui.TextSize = 13
+
+	local openStoryBtn = UIFramework.UIButton.new("OpenStory", "▶ VIEW MAP", Theme.Colors.PanelHighlight, storyBanner.Gui)
+	openStoryBtn.Gui.Size = UDim2.new(0, 120, 0, 30)
+	openStoryBtn.Gui.AnchorPoint = Vector2.new(1, 1)
+	openStoryBtn.Gui.Position = UDim2.new(1, -12, 1, -12)
+	openStoryBtn.Gui.Font = Enum.Font.GothamBold
+	openStoryBtn.Gui.TextSize = 12
+	applyHoverEffect(openStoryBtn.Gui, 1.05, 15)
+
+	local questsPanel = UIFramework.UIFrame.new("QuestsPanel", Theme.Colors.Panel, missionsLeftPanel)
+	questsPanel.Gui.Size = UDim2.new(1, 0, 1, -135)
+	questsPanel.Gui.LayoutOrder = 2
+
+	local questsPadding = Instance.new("UIPadding", questsPanel.Gui)
+	questsPadding.PaddingTop = UDim.new(0, 14); questsPadding.PaddingLeft = UDim.new(0, 14); questsPadding.PaddingRight = UDim.new(0, 14)
+
+	local questsLayout = Instance.new("UIListLayout", questsPanel.Gui)
+	questsLayout.Padding = UDim.new(0, 10)
+
+	local questsTitle = UIFramework.UILabel.new("QuestsTitle", questsPanel.Gui)
+	questsTitle.Gui.Size = UDim2.new(1, 0, 0, 18)
+	questsTitle:SetText("DUTY LOG  •  QUESTS")
+	questsTitle.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+	questsTitle.Gui.Font = Enum.Font.GothamBold
+	questsTitle.Gui.TextSize = 11
+	questsTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	local questTypeColors = {Hourly = Color3.fromRGB(100, 200, 255), Daily = Color3.fromRGB(255, 200, 50), Weekly = Color3.fromRGB(180, 80, 255)}
+
+	local function createQuestCategory(title: string, desc: string, progress: string)
+		local questType = title:split(":")[1]
+		local accentColor = questTypeColors[questType] or Theme.Colors.ObjectiveText
+
+		local block = UIFramework.UIFrame.new("Quest_"..title, Theme.Colors.Background, questsPanel.Gui)
+		block.Gui.Size = UDim2.new(1, 0, 0, 70)
+
+		local topBar2 = Instance.new("Frame", block.Gui)
+		topBar2.Size = UDim2.new(1, 0, 0, 3)
+		topBar2.BackgroundColor3 = accentColor; topBar2.BorderSizePixel = 0
+
+		local titleLabel = UIFramework.UILabel.new("Title", block.Gui)
+		titleLabel.Gui.Size = UDim2.new(0.6, 0, 0, 22)
+		titleLabel.Gui.Position = UDim2.new(0, 10, 0, 8)
+		titleLabel:SetText(title)
+		titleLabel.Gui.Font = Enum.Font.GothamBold
+		titleLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		titleLabel.Gui.TextColor3 = accentColor
+		titleLabel.Gui.TextSize = 13
+
+		local descLabel = UIFramework.UILabel.new("Desc", block.Gui)
+		descLabel.Gui.Size = UDim2.new(0.9, 0, 0, 18)
+		descLabel.Gui.Position = UDim2.new(0, 10, 0, 38)
+		descLabel:SetText(desc)
+		descLabel.Gui.TextColor3 = Theme.Colors.TextMuted
+		descLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		descLabel.Gui.Font = Enum.Font.Gotham
+		descLabel.Gui.TextSize = 12
+
+		local progLabel = UIFramework.UILabel.new("Progress", block.Gui)
+		progLabel.Gui.Size = UDim2.new(0.35, 0, 0, 22)
+		progLabel.Gui.Position = UDim2.new(0.62, 0, 0, 8)
+		progLabel:SetText(progress)
+		progLabel.Gui.TextColor3 = Theme.Colors.ObjectiveText
+		progLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		progLabel.Gui.Font = Enum.Font.GothamBold
+		progLabel.Gui.TextSize = 13
+	end
+
+	createQuestCategory("Hourly: Patrol Route", "Defeat 50 Enemies in any Zone.", "0/50")
+	createQuestCategory("Daily: Plus Ultra", "Roll 10 Quirks from the Gacha.", "0/10")
+	createQuestCategory("Weekly: Raid Boss", "Participate in 3 Emergency Raids.", "0/3")
+
+	-- Training scroll
+	local trainingScroll = UIFramework.UIScrollFrame.new("TrainingList", Theme.Colors.Panel, missionsPage)
+	trainingScroll.Gui.Size = UDim2.new(0, 450, 0, 500)
+
+	local trainingPadding = Instance.new("UIPadding", trainingScroll.Gui)
+	trainingPadding.PaddingTop = UDim.new(0, 15); trainingPadding.PaddingLeft = UDim.new(0, 15); trainingPadding.PaddingRight = UDim.new(0, 15)
+
+	local trainingLayout = Instance.new("UIListLayout", trainingScroll.Gui)
+	trainingLayout.Padding = UDim.new(0, 10)
+	trainingLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local trainingTitle = UIFramework.UILabel.new("TrainingTitle", trainingScroll.Gui)
+	trainingTitle.Gui.Size = UDim2.new(1, 0, 0, 18)
+	trainingTitle.Gui.LayoutOrder = 0
+	trainingTitle:SetText("TRAINING GROUNDS  •  TRAINING XP")
+	trainingTitle.Gui.TextColor3 = Color3.fromRGB(100, 180, 255)
+	trainingTitle.Gui.Font = Enum.Font.GothamBold
+	trainingTitle.Gui.TextSize = 11
+	trainingTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	local function createTrainingBlock(taskName: string, rewardText: string, isLocked: boolean, reqText: string, order: number)
+		local block = UIFramework.UIFrame.new("Train_"..taskName, Theme.Colors.Background, trainingScroll.Gui)
+		block.Gui.Size = UDim2.new(1, 0, 0, 80)
+		block.Gui.LayoutOrder = order
+
+		local accentBar = Instance.new("Frame", block.Gui)
+		accentBar.Size = UDim2.new(0, 3, 1, 0)
+		accentBar.BackgroundColor3 = isLocked and Color3.fromRGB(60, 60, 75) or Color3.fromRGB(100, 180, 255)
+		accentBar.BorderSizePixel = 0
+		local abCorner = Instance.new("UICorner", accentBar); abCorner.CornerRadius = UDim.new(0, 4)
+
+		local nameLabel = UIFramework.UILabel.new("Name", block.Gui)
+		nameLabel.Gui.Size = UDim2.new(0.5, 0, 0, 20)
+		nameLabel.Gui.Position = UDim2.new(0, 14, 0, 10)
+		nameLabel:SetText(taskName)
+		nameLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		nameLabel.Gui.Font = Enum.Font.GothamBold
+		nameLabel.Gui.TextColor3 = isLocked and Theme.Colors.LockedText or Theme.Colors.PrimaryText
+
+		local rewardLabel = UIFramework.UILabel.new("Rewards", block.Gui)
+		rewardLabel.Gui.Size = UDim2.new(0.4, 0, 0, 20)
+		rewardLabel.Gui.Position = UDim2.new(0.55, 0, 0, 10)
+		rewardLabel:SetText(rewardText)
+		rewardLabel.Gui.TextColor3 = isLocked and Theme.Colors.LockedText or Color3.fromRGB(100, 180, 255)
+		rewardLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		rewardLabel.Gui.Font = Enum.Font.GothamBold
+
+		if isLocked then
+			local lockLabel = UIFramework.UILabel.new("Locked", block.Gui)
+			lockLabel.Gui.Size = UDim2.new(0.85, 0, 0, 20)
+			lockLabel.Gui.Position = UDim2.new(0, 14, 0, 48)
+			lockLabel:SetText("🔒 " .. reqText)
+			lockLabel.Gui.TextColor3 = Theme.Colors.LockedText
+			lockLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+			lockLabel.Gui.Font = Enum.Font.Gotham
+			lockLabel.Gui.TextSize = 12
+		else
+			local pBar = UIFramework.UIProgressBar.new("ProgressBar", block.Gui)
+			pBar.Gui.Size = UDim2.new(0.58, 0, 0, 12)
+			pBar.Gui.Position = UDim2.new(0, 14, 0, 50)
+
+			local actionBtn = UIFramework.UIButton.new("ActionBtn", "TRAIN", Theme.Colors.PanelHighlight, block.Gui)
+			actionBtn.Gui.Size = UDim2.new(0.22, 0, 0, 26)
+			actionBtn.Gui.Position = UDim2.new(0.75, 0, 0, 42)
+			actionBtn.Gui.Font = Enum.Font.GothamBold
+			actionBtn.Gui.TextSize = 12
+			applyHoverEffect(actionBtn.Gui, 1.06, 15)
+
+			RunService.RenderStepped:Connect(function()
+				if activeTask.Value == taskName then
+					actionBtn:SetText("STOP")
+					actionBtn.Gui.TextColor3 = Color3.fromRGB(255, 80, 80)
+					accentBar.BackgroundColor3 = Color3.fromRGB(80, 220, 100)
+					local progress = (os.clock() % 6) / 6
+					pBar:SetProgress(progress)
+				else
+					actionBtn:SetText("TRAIN")
+					actionBtn.Gui.TextColor3 = Theme.Colors.Text
+					accentBar.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+					pBar:SetProgress(0)
+				end
+			end)
+
+			actionBtn:OnClick(function()
+				if activeTask.Value == taskName then ChangeTaskEvent:FireServer("None")
+				else
+					ChangeTaskEvent:FireServer(taskName)
+					showToast("▶ Training: " .. taskName, Color3.fromRGB(100, 180, 255))
+				end
+			end)
+		end
+	end
+
+	createTrainingBlock("Community Gym", "+15 XP/min", false, "", 1)
+	createTrainingBlock("U.A. Gym Gamma", "+75 XP/min", false, "", 2)
+	createTrainingBlock("U.S.J. Fire Zone", "+300 XP/min", true, "Requires: Pass Battle Trials", 3)
+	createTrainingBlock("Sports Fest Ring", "+1,200 XP/min", true, "Requires: Clear U.S.J.", 4)
+	createTrainingBlock("Gran Torino's Apt", "+4,000 XP/min", true, "Requires: Rebirth 1", 5)
+
+	-- Map Overlay (Story Map)
+	shared_mapOverlay = Instance.new("Frame", screenGui)
+	shared_mapOverlay.Name = "StoryMapOverlay"
+	shared_mapOverlay.Size = UDim2.new(1, 0, 1, -50)
+	shared_mapOverlay.Position = UDim2.new(0, 0, 0, 50)
+	shared_mapOverlay.BackgroundColor3 = Color3.fromRGB(10, 10, 16)
+	shared_mapOverlay.Visible = false
+	shared_mapOverlay.ZIndex = 50
+
+	local closeMapBtn = UIFramework.UIButton.new("CloseMap", "✕  CLOSE MAP", Theme.Colors.PanelHighlight, shared_mapOverlay)
+	closeMapBtn.Gui.Size = UDim2.new(0, 130, 0, 35)
+	closeMapBtn.Gui.Position = UDim2.new(0, 20, 0, 18)
+	closeMapBtn.Gui.Font = Enum.Font.GothamBold
+	closeMapBtn.Gui.TextSize = 13
+	applyHoverEffect(closeMapBtn.Gui, 1.04, 15)
+
+	-- Map title header
+	local mapHeader = Instance.new("TextLabel", shared_mapOverlay)
+	mapHeader.Size = UDim2.new(0, 300, 0, 35)
+	mapHeader.Position = UDim2.new(0.5, -150, 0, 18)
+	mapHeader.BackgroundTransparency = 1
+	mapHeader.Text = "◆ STORY MAP ◆"
+	mapHeader.TextColor3 = Color3.fromRGB(115, 195, 235)
+	mapHeader.Font = Enum.Font.GothamBlack
+	mapHeader.TextSize = 18
+
+	local zonesScroll = UIFramework.UIScrollFrame.new("ZonesList", Theme.Colors.Background, shared_mapOverlay)
+	zonesScroll.Gui.Size = UDim2.new(1, -340, 1, -80)
+	zonesScroll.Gui.Position = UDim2.new(0, 20, 0, 68)
+	zonesScroll.Gui.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	zonesScroll.Gui.CanvasSize = UDim2.new(0, 0, 0, 0)
+	zonesScroll.Gui.ScrollBarThickness = 5
+	zonesScroll.Gui.ClipsDescendants = true
+
+	local zonesPadding = Instance.new("UIPadding", zonesScroll.Gui)
+	zonesPadding.PaddingTop = UDim.new(0, 10); zonesPadding.PaddingLeft = UDim.new(0, 10); zonesPadding.PaddingRight = UDim.new(0, 18)
+
+	local zonesLayout = Instance.new("UIListLayout", zonesScroll.Gui)
+	zonesLayout.Padding = UDim.new(0, 12)
+	zonesLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local mapInfoPanel = UIFramework.UIFrame.new("MapInfo", Theme.Colors.Panel, shared_mapOverlay)
+	mapInfoPanel.Gui.Size = UDim2.new(0, 300, 1, -40)
+	mapInfoPanel.Gui.AnchorPoint = Vector2.new(1, 0)
+	mapInfoPanel.Gui.Position = UDim2.new(1, -20, 0, 20)
+
+	local infoPadding = Instance.new("UIPadding", mapInfoPanel.Gui)
+	infoPadding.PaddingTop = UDim.new(0, 20); infoPadding.PaddingLeft = UDim.new(0, 20)
+	infoPadding.PaddingRight = UDim.new(0, 20); infoPadding.PaddingBottom = UDim.new(0, 20)
+
+	local infoLayout = Instance.new("UIListLayout", mapInfoPanel.Gui)
+	infoLayout.Padding = UDim.new(0, 10)
+	infoLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local zoneTitle = UIFramework.UILabel.new("ZoneTitle", mapInfoPanel.Gui)
+	zoneTitle.Gui.Size = UDim2.new(1, 0, 0, 30)
+	zoneTitle.Gui.LayoutOrder = 1
+	zoneTitle:SetText("SELECT A ZONE")
+	zoneTitle.Gui.TextColor3 = Theme.Colors.PrimaryText
+	zoneTitle.Gui.Font = Enum.Font.GothamBlack
+	zoneTitle.Gui.TextSize = 20
+	zoneTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+	local zoneDesc = UIFramework.UILabel.new("ZoneDesc", mapInfoPanel.Gui)
+	zoneDesc.Gui.Size = UDim2.new(1, 0, 0, 50)
+	zoneDesc.Gui.LayoutOrder = 2
+	zoneDesc:SetText("Select a deployment zone to view intel.")
+	zoneDesc.Gui.TextColor3 = Theme.Colors.Text
+	zoneDesc.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	zoneDesc.Gui.TextYAlignment = Enum.TextYAlignment.Top
+	zoneDesc.Gui.TextWrapped = true
+	zoneDesc.Gui.Font = Enum.Font.Gotham
+	zoneDesc.Gui.TextSize = 13
+
+	local enemyLabel = UIFramework.UILabel.new("EnemyTypes", mapInfoPanel.Gui)
+	enemyLabel.Gui.Size = UDim2.new(1, 0, 0, 40)
+	enemyLabel.Gui.LayoutOrder = 3
+	enemyLabel:SetText("")
+	enemyLabel.Gui.TextColor3 = Theme.Colors.TextMuted
+	enemyLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	enemyLabel.Gui.TextYAlignment = Enum.TextYAlignment.Top
+	enemyLabel.Gui.TextWrapped = true
+	enemyLabel.Gui.Font = Enum.Font.Gotham
+	enemyLabel.Gui.TextSize = 13
+
+	local objLabel = UIFramework.UILabel.new("ObjectiveLabel", mapInfoPanel.Gui)
+	objLabel.Gui.Size = UDim2.new(1, 0, 0, 60)
+	objLabel.Gui.LayoutOrder = 4
+	objLabel:SetText("")
+	objLabel.Gui.TextColor3 = Theme.Colors.ObjectiveText
+	objLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	objLabel.Gui.TextYAlignment = Enum.TextYAlignment.Top
+	objLabel.Gui.TextWrapped = true
+	objLabel.Gui.Font = Enum.Font.GothamBold
+	objLabel.Gui.TextSize = 13
+
+	local spacer = Instance.new("Frame", mapInfoPanel.Gui)
+	spacer.Size = UDim2.new(1, 0, 1, -250)
+	spacer.BackgroundTransparency = 1
+	spacer.LayoutOrder = 5
+
+	local enterZoneBtn = UIFramework.UIButton.new("EnterZone", "▶  DEPLOY TO ZONE", Theme.Colors.PanelHighlight, mapInfoPanel.Gui)
+	enterZoneBtn.Gui.Size = UDim2.new(1, 0, 0, 48)
+	enterZoneBtn.Gui.LayoutOrder = 6
+	enterZoneBtn.Gui.Visible = false
+	enterZoneBtn.Gui.Font = Enum.Font.GothamBlack
+	enterZoneBtn.Gui.TextSize = 14
+	local deployStroke = Instance.new("UIStroke", enterZoneBtn.Gui)
+	deployStroke.Color = Color3.fromRGB(115, 195, 235); deployStroke.Thickness = 1; deployStroke.Transparency = 0.4
+	applyHoverEffect(enterZoneBtn.Gui, 1.04, 18)
+
+	local selectedZoneId = nil
+
+	local function selectZone(id: string, name: string, desc: string, enemies: string, boss: string, objective: string)
+		selectedZoneId = id
+		zoneTitle:SetText(name)
+		zoneDesc:SetText(desc)
+		enemyLabel:SetText("⚠ Hostiles: " .. enemies)
+		objLabel:SetText("► Defeat " .. boss .. " to " .. objective)
+		enterZoneBtn.Gui.Visible = true
+	end
+
+	enterZoneBtn:OnClick(function()
+		if selectedZoneId then
+			StartCombatEvent:FireServer(selectedZoneId)
+			shared_mapOverlay.Visible = false
+			switchTab("COMBAT")
+			showToast("⚔ Deploying to combat zone...", Color3.fromRGB(255, 80, 80))
+		end
+	end)
+
+	local function createZoneBox(id: string, order: number, name: string, desc: string, enemies: string, boss: string, objective: string, isLocked: boolean)
+		local box = UIFramework.UIButton.new("ZoneBox_"..order, "", Theme.Colors.Panel, zonesScroll.Gui)
+		box.Gui.Size = UDim2.new(1, 0, 0, 85)
+		box.Gui.LayoutOrder = order
+		box:SetText("")
+
+		-- Zone number badge
+		local numBadge = Instance.new("Frame", box.Gui)
+		numBadge.Size = UDim2.new(0, 30, 0, 30)
+		numBadge.Position = UDim2.new(0, 12, 0, 10)
+		numBadge.BackgroundColor3 = isLocked and Color3.fromRGB(50, 50, 65) or Color3.fromRGB(115, 195, 235)
+		numBadge.BorderSizePixel = 0
+		local nbCorner = Instance.new("UICorner", numBadge); nbCorner.CornerRadius = UDim.new(0, 6)
+		local numText = Instance.new("TextLabel", numBadge)
+		numText.Size = UDim2.new(1, 0, 1, 0)
+		numText.BackgroundTransparency = 1
+		numText.Text = tostring(order)
+		numText.Font = Enum.Font.GothamBlack
+		numText.TextSize = 15
+		numText.TextColor3 = isLocked and Color3.fromRGB(100, 100, 120) or Color3.fromRGB(15, 20, 35)
+
+		local bTitle = UIFramework.UILabel.new("BoxTitle", box.Gui)
+		bTitle.Gui.Size = UDim2.new(1, -60, 0, 28)
+		bTitle.Gui.Position = UDim2.new(0, 52, 0, 8)
+		bTitle:SetText(name)
+		bTitle.Gui.Font = Enum.Font.GothamBold
+		bTitle.Gui.TextSize = 14
+		bTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+
+		local bStatus = UIFramework.UILabel.new("BoxStatus", box.Gui)
+		bStatus.Gui.Size = UDim2.new(1, -60, 0, 20)
+		bStatus.Gui.Position = UDim2.new(0, 52, 0, 42)
+		bStatus.Gui.TextXAlignment = Enum.TextXAlignment.Left
+		bStatus.Gui.Font = Enum.Font.Gotham
+		bStatus.Gui.TextSize = 12
+
+		if isLocked then
+			bStatus:SetText("🔒 LOCKED")
+			bStatus.Gui.TextColor3 = Theme.Colors.LockedText
+			bTitle.Gui.TextColor3 = Theme.Colors.LockedText
+		else
+			bStatus:SetText("✔ UNLOCKED  •  Boss: " .. boss)
+			bStatus.Gui.TextColor3 = Theme.Colors.ObjectiveText
+			bTitle.Gui.TextColor3 = Theme.Colors.PrimaryText
+			applyHoverEffect(box.Gui, 1.02, 8)
+		end
+
+		box:OnClick(function()
+			if not isLocked then selectZone(id, name, desc, enemies, boss, objective) end
+		end)
+	end
+
+	createZoneBox("1", 1, "Zone 1: U.A. Entrance Exam", "Prove your worth in the practical exam.", "1-Pt, 2-Pt, 3-Pt Faux Villains.", "Examiner Present Mic", "pass the vibe check.", false)
+	createZoneBox("2", 2, "Zone 2: Ground Beta", "Face off against Class 1-A in the Battle Trials.", "Class 1-A Trainees.", "Katsuki Bakugo", "prove your combat superiority.", false)
+	createZoneBox("3", 3, "Zone 3: U.S.J. Facility", "Survive the League of Villains' ambush.", "LoV Thugs.", "U.S.J. Nomu", "halt its massive regeneration.", true)
+	createZoneBox("4", 4, "Zone 4: U.A. Sports Festival", "Compete against your peers in a televised tournament.", "U.A. Rivals.", "Shoto Todoroki", "win the tournament.", true)
+	createZoneBox("5", 5, "Zone 5: Hosu City", "Purge the streets of the Hero Killer and Nomu threat.", "Lower-Tier Nomus.", "Hosu High-End Nomu", "earn your Provisional License.", true)
+
+	openStoryBtn:OnClick(function() shared_mapOverlay.Visible = true end)
+	closeMapBtn:OnClick(function() shared_mapOverlay.Visible = false end)
+end
+
+-- ==========================================
+-- BUILDER: INVENTORY PAGE
+-- ==========================================
+local function BuildInventoryPage()
+	local inventoryPage = pages["INVENTORY"]
+
+	local invLayout = Instance.new("UIListLayout", inventoryPage)
+	invLayout.FillDirection = Enum.FillDirection.Horizontal
+	invLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	invLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	invLayout.Padding = UDim.new(0, 20)
+
+	local gearPanel = Instance.new("Frame", inventoryPage)
+	gearPanel.Name = "GearPanel"
+	gearPanel.Size = UDim2.new(0, 380, 0, 500)
+	gearPanel.BackgroundTransparency = 1
+
+	local gearLayout = Instance.new("UIListLayout", gearPanel)
+	gearLayout.Padding = UDim.new(0, 14)
+	gearLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local equippedGearFrame = UIFramework.UIFrame.new("EquippedGear", Theme.Colors.Panel, gearPanel)
+	equippedGearFrame.Gui.Size = UDim2.new(1, 0, 0, 150)
+	equippedGearFrame.Gui.LayoutOrder = 1
+
+	local eqTitle = UIFramework.UILabel.new("EqTitle", equippedGearFrame.Gui)
+	eqTitle.Gui.Size = UDim2.new(1, -30, 0, 18)
+	eqTitle.Gui.Position = UDim2.new(0, 15, 0, 10)
+	eqTitle:SetText("ACTIVE LOADOUT  •  SELECT SLOT")
+	eqTitle.Gui.Font = Enum.Font.GothamBold
+	eqTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	eqTitle.Gui.TextSize = 11
+	eqTitle.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+
+	local eqSlotsContainer = Instance.new("Frame", equippedGearFrame.Gui)
+	eqSlotsContainer.Size = UDim2.new(1, -30, 0, 100)
+	eqSlotsContainer.Position = UDim2.new(0, 15, 0, 36)
+	eqSlotsContainer.BackgroundTransparency = 1
+
+	local eqLayout = Instance.new("UIListLayout", eqSlotsContainer)
+	eqLayout.FillDirection = Enum.FillDirection.Horizontal
+	eqLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	eqLayout.Padding = UDim.new(0, 12)
+
+	local slotIcons = {WEAPON = "⚔", ARMOR = "🛡", ASSIST = "🔧"}
+
+	local function createGearSlot(slotName: string, defaultDesc: string)
+		local slotBtn = UIFramework.UIButton.new("Slot_"..slotName, "", Theme.Colors.Background, eqSlotsContainer)
+		slotBtn.Gui.Size = UDim2.new(0.3, 0, 1, 0)
+		slotBtn:SetText("")
+		applyHoverEffect(slotBtn.Gui, 1.05, 12)
+
+		local iconLbl = Instance.new("TextLabel", slotBtn.Gui)
+		iconLbl.Size = UDim2.new(1, 0, 0, 22)
+		iconLbl.Position = UDim2.new(0, 0, 0, 5)
+		iconLbl.BackgroundTransparency = 1
+		iconLbl.Text = slotIcons[slotName] or "•"
+		iconLbl.TextSize = 16
+		iconLbl.Font = Enum.Font.GothamBold
+
+		local title = UIFramework.UILabel.new("Title", slotBtn.Gui)
+		title.Gui.Size = UDim2.new(1, 0, 0, 16)
+		title.Gui.Position = UDim2.new(0, 0, 0, 26)
+		title:SetText(slotName)
+		title.Gui.Font = Enum.Font.GothamBold
+		title.Gui.TextSize = 11
+		title.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+
+		local desc = UIFramework.UILabel.new("Desc", slotBtn.Gui)
+		desc.Gui.Size = UDim2.new(1, -8, 0, 46)
+		desc.Gui.Position = UDim2.new(0, 4, 0, 44)
+		desc:SetText(defaultDesc)
+		desc.Gui.TextColor3 = Theme.Colors.TextMuted
+		desc.Gui.TextSize = 11
+		desc.Gui.TextWrapped = true
+		desc.Gui.Font = Enum.Font.Gotham
+
+		local stroke = Instance.new("UIStroke", slotBtn.Gui)
+		stroke.Thickness = 2
+		stroke.Color = Color3.fromRGB(115, 195, 235)
+		stroke.Transparency = (slotName == "WEAPON") and 0 or 1
+
+		shared_gearSlotUIs[slotName] = {Btn = slotBtn, Desc = desc, Stroke = stroke}
+
+		slotBtn:OnClick(function()
+			shared_selectedGearSlot = slotName
+			for name, data in pairs(shared_gearSlotUIs) do
+				TweenService:Create(data.Stroke, TweenInfo.new(0.15), {Transparency = (name == slotName) and 0 or 1}):Play()
+			end
+		end)
+	end
+
+	createGearSlot("WEAPON", "Empty\n(+STR)")
+	createGearSlot("ARMOR", "Gym Shirt\n(+END / +HP)")
+	createGearSlot("ASSIST", "Empty\n(+QF / Utility)")
+
+	local stashFrame = UIFramework.UIFrame.new("StashFrame", Theme.Colors.Panel, gearPanel)
+	stashFrame.Gui.Size = UDim2.new(1, 0, 1, -165)
+	stashFrame.Gui.LayoutOrder = 2
+
+	local stashTitle = UIFramework.UILabel.new("StashTitle", stashFrame.Gui)
+	stashTitle.Gui.Size = UDim2.new(1, -30, 0, 18)
+	stashTitle.Gui.Position = UDim2.new(0, 15, 0, 10)
+	stashTitle:SetText("GEAR STASH  •  CLICK TO EQUIP")
+	stashTitle.Gui.Font = Enum.Font.GothamBold
+	stashTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	stashTitle.Gui.TextSize = 11
+	stashTitle.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+
+	local gearGrid = UIFramework.UIScrollFrame.new("GearGrid", Theme.Colors.Background, stashFrame.Gui)
+	gearGrid.Gui.Size = UDim2.new(1, -30, 1, -45)
+	gearGrid.Gui.Position = UDim2.new(0, 15, 0, 38)
+	gearGrid.Gui.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	gearGrid.Gui.ScrollBarThickness = 5
+
+	local gridLayout = Instance.new("UIGridLayout", gearGrid.Gui)
+	gridLayout.CellSize = UDim2.new(0, 100, 0, 65)
+	gridLayout.CellPadding = UDim2.new(0, 10, 0, 10)
+
+	local function createStashItem(name: string, statText: string, rarityColor: Color3, gearType: string)
+		local btn = UIFramework.UIButton.new("Item_"..name, "", Theme.Colors.PanelHighlight, gearGrid.Gui)
+		applyHoverEffect(btn.Gui, 1.07, 12)
+
+		-- Rarity tint on top edge
+		local rarBar = Instance.new("Frame", btn.Gui)
+		rarBar.Size = UDim2.new(1, 0, 0, 3)
+		rarBar.BackgroundColor3 = rarityColor; rarBar.BorderSizePixel = 0
+
+		local label = UIFramework.UILabel.new("Name", btn.Gui)
+		label.Gui.Size = UDim2.new(1, -6, 0, 22)
+		label.Gui.Position = UDim2.new(0, 3, 0, 8)
+		label:SetText(name)
+		label.Gui.TextSize = 12
+		label.Gui.TextColor3 = rarityColor
+		label.Gui.TextWrapped = true
+		label.Gui.Font = Enum.Font.GothamBold
+
+		local stat = UIFramework.UILabel.new("Stat", btn.Gui)
+		stat.Gui.Size = UDim2.new(1, 0, 0, 18)
+		stat.Gui.Position = UDim2.new(0, 0, 0, 36)
+		stat:SetText(statText)
+		stat.Gui.TextSize = 11
+		stat.Gui.TextColor3 = Theme.Colors.TextMuted
+		stat.Gui.Font = Enum.Font.Gotham
+
+		btn:OnClick(function()
+			local targetSlotUI = shared_gearSlotUIs[gearType]
+			if targetSlotUI then
+				targetSlotUI.Desc:SetText(name .. "\n(" .. statText .. ")")
+				shared_selectedGearSlot = gearType
+				for slotName, data in pairs(shared_gearSlotUIs) do
+					TweenService:Create(data.Stroke, TweenInfo.new(0.15), {Transparency = (slotName == gearType) and 0 or 1}):Play()
+				end
+				EquipGearEvent:FireServer(gearType, name)
+				showToast("⚔ Equipped: " .. name, rarityColor)
+			end
+		end)
+	end
+
+	createStashItem("Steel Pipe", "+15 STR", RarityColors.Common, "WEAPON")
+	createStashItem("Stun Baton", "+10% Stun", RarityColors.Rare, "WEAPON")
+	createStashItem("Heavy Vest", "+50 END", RarityColors.Rare, "ARMOR")
+	createStashItem("Cooling Vents", "-1 CD", RarityColors.Uncommon, "ASSIST")
+
+	-- Moveset Panel
+	local movesetPanel = Instance.new("Frame", inventoryPage)
+	movesetPanel.Size = UDim2.new(0, 450, 0, 500)
+	movesetPanel.BackgroundTransparency = 1
+
+	local msLayout = Instance.new("UIListLayout", movesetPanel)
+	msLayout.Padding = UDim.new(0, 14)
+	msLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local activeMovesFrame = UIFramework.UIFrame.new("ActiveMoves", Theme.Colors.Panel, movesetPanel)
+	activeMovesFrame.Gui.Size = UDim2.new(1, 0, 0, 120)
+	activeMovesFrame.Gui.LayoutOrder = 1
+
+	local activeTitle = UIFramework.UILabel.new("ActiveTitle", activeMovesFrame.Gui)
+	activeTitle.Gui.Size = UDim2.new(1, -30, 0, 18)
+	activeTitle.Gui.Position = UDim2.new(0, 15, 0, 10)
+	activeTitle:SetText("EQUIPPED MOVES  •  SELECT SLOT")
+	activeTitle.Gui.Font = Enum.Font.GothamBold
+	activeTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	activeTitle.Gui.TextSize = 11
+	activeTitle.Gui.TextColor3 = Color3.fromRGB(115, 195, 235)
+
+	local slotsContainer = Instance.new("Frame", activeMovesFrame.Gui)
+	slotsContainer.Size = UDim2.new(1, -30, 0, 72)
+	slotsContainer.Position = UDim2.new(0, 15, 0, 36)
+	slotsContainer.BackgroundTransparency = 1
+	local slotsLayout = Instance.new("UIListLayout", slotsContainer)
+	slotsLayout.FillDirection = Enum.FillDirection.Horizontal
+	slotsLayout.Padding = UDim.new(0, 10)
+
+	local slotStrokes = {}
+	for i = 1, 4 do
+		local slotBtn = UIFramework.UIButton.new("Slot"..i, "SLOT " .. i, Theme.Colors.Background, slotsContainer)
+		slotBtn.Gui.Size = UDim2.new(0.25, -8, 1, 0)
+		slotBtn.Gui.TextWrapped = true
+		slotBtn.Gui.TextSize = 11
+		slotBtn.Gui.Font = Enum.Font.GothamBold
+		applyHoverEffect(slotBtn.Gui, 1.05, 12)
+
+		local stroke = Instance.new("UIStroke", slotBtn.Gui)
+		stroke.Thickness = 2
+		stroke.Color = Color3.fromRGB(115, 195, 235)
+		stroke.Transparency = (i == 1) and 0 or 1
+		table.insert(slotStrokes, stroke)
+
+		-- Move slot number badge
+		local slotNum = Instance.new("TextLabel", slotBtn.Gui)
+		slotNum.Size = UDim2.new(0, 16, 0, 16)
+		slotNum.Position = UDim2.new(0, 3, 0, 3)
+		slotNum.BackgroundColor3 = Color3.fromRGB(115, 195, 235)
+		slotNum.BackgroundTransparency = (i == 1) and 0 or 0.6
+		slotNum.Text = tostring(i)
+		slotNum.TextColor3 = Color3.fromRGB(15, 20, 35)
+		slotNum.Font = Enum.Font.GothamBlack
+		slotNum.TextSize = 10
+		slotNum.BorderSizePixel = 0
+		local snCorner = Instance.new("UICorner", slotNum); snCorner.CornerRadius = UDim.new(0, 4)
+
+		slotBtn:OnClick(function()
+			shared_selectedSlotIndex = i
+			for j, s in ipairs(slotStrokes) do
+				TweenService:Create(s, TweenInfo.new(0.15), {Transparency = (j == i) and 0 or 1}):Play()
+			end
+		end)
+
+		table.insert(shared_activeSlotBtns, slotBtn)
+	end
+
+	local availableMovesFrame = UIFramework.UIFrame.new("AvailMoves", Theme.Colors.Panel, movesetPanel)
+	availableMovesFrame.Gui.Size = UDim2.new(1, 0, 1, -135)
+	availableMovesFrame.Gui.LayoutOrder = 2
+
+	local masteryTitle = UIFramework.UILabel.new("MasteryTitle", availableMovesFrame.Gui)
+	masteryTitle.Gui.Size = UDim2.new(1, -30, 0, 22)
+	masteryTitle.Gui.Position = UDim2.new(0, 15, 0, 10)
+	masteryTitle:SetText("MASTERY: Lvl 1 (0/100 XP)")
+	masteryTitle.Gui.Font = Enum.Font.GothamBold
+	masteryTitle.Gui.TextColor3 = Color3.fromRGB(255, 200, 50)
+	masteryTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	masteryTitle.Gui.TextSize = 13
+
+	local availScroll = UIFramework.UIScrollFrame.new("AvailScroll", Theme.Colors.Background, availableMovesFrame.Gui)
+	availScroll.Gui.Size = UDim2.new(1, -30, 1, -48)
+	availScroll.Gui.Position = UDim2.new(0, 15, 0, 40)
+	availScroll.Gui.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	availScroll.Gui.ScrollBarThickness = 5
+	local availLayout = Instance.new("UIListLayout", availScroll.Gui)
+	availLayout.Padding = UDim.new(0, 6)
+
+	local MasteryMilestones = {
+		Quirk = {
+			["Long Neck"] = {{ReqLvl=1,Name="Neck Whip",Id="neck_whip",Desc="100% QF. Thwack them with your face."},{ReqLvl=15,Name="Headbutt Rush",Id="headbutt_rush",Desc="150% QF. Heavy hit, stuns the target."},{ReqLvl=30,Name="Giraffe Slam",Id="giraffe_slam",Desc="200% QF. AoE sweep attack."}},
+			["Tape"] = {{ReqLvl=1,Name="Tape Whip",Id="tape_whip",Desc="120% QF Damage."},{ReqLvl=15,Name="Tape Trap",Id="tape_trap",Desc="110% QF. Binds and Stuns the target."},{ReqLvl=30,Name="Tape Barricade",Id="tape_barricade",Desc="150% QF AoE."}},
+			["Hardening"] = {{ReqLvl=1,Name="Hardened Punch",Id="hard_punch",Desc="150% QF Damage."},{ReqLvl=20,Name="Red Counter",Id="red_counter",Desc="180% QF. Hardens user's skin."},{ReqLvl=40,Name="Unbreakable Smash",Id="unbreakable_smash",Desc="300% QF. Ignores pain for a massive hit."}},
+			["Acid"] = {{ReqLvl=1,Name="Acid Shot",Id="acid_shot",Desc="150% QF. Corrodes Armor."},{ReqLvl=20,Name="Acid Veil",Id="acid_veil",Desc="200% QF. Melts incoming attacks."},{ReqLvl=40,Name="Acidman Burst",Id="acidman",Desc="350% QF AoE. Massive corrosive wave."}},
+			["Dark Shadow"] = {{ReqLvl=1,Name="Shadow Strike",Id="shadow_strike",Desc="180% QF Damage."},{ReqLvl=25,Name="Shadow Crush",Id="shadow_crush",Desc="250% QF. Terrifies target, applying Brittle."},{ReqLvl=50,Name="Abyssal Rampage",Id="abyssal_rampage",Desc="400% QF AoE. Uncontrollable dark energy burst."}},
+			["Engine"] = {{ReqLvl=1,Name="Engine Kick",Id="engine_kick",Desc="180% QF Damage."},{ReqLvl=15,Name="Torque Smash",Id="torque_smash",Desc="220% QF. Crushes armor."},{ReqLvl=30,Name="Recipro Burst",Id="recipro_burst",Desc="GIMMICK: Take 3 turns back-to-back!"},{ReqLvl=50,Name="Recipro Extend",Id="recipro_extend",Desc="400% QF. Devastating kick."}},
+			["Electrification"] = {{ReqLvl=1,Name="Static Shock",Id="static_shock",Desc="160% QF Damage."},{ReqLvl=20,Name="Target Electroshock",Id="target_electro",Desc="200% QF. Paralyzes the target."},{ReqLvl=40,Name="1.3 Million Volts",Id="million_volts",Desc="500% QF AoE. Massive damage."}},
+			["Zero Gravity"] = {{ReqLvl=1,Name="Gravity Strike",Id="gravity_strike",Desc="160% QF Damage."},{ReqLvl=20,Name="Weightless Float",Id="weightless_float",Desc="GIMMICK: Applies Gravity."},{ReqLvl=40,Name="Meteor Shower",Id="meteor_shower",Desc="350% QF AoE. Massive pillar drop."}},
+			["Explosion"] = {{ReqLvl=1,Name="Explosion Blast",Id="explosion_blast",Desc="200% QF Damage."},{ReqLvl=25,Name="AP Shot",Id="ap_shot",Desc="250% QF. Armor piercing round."},{ReqLvl=50,Name="Howitzer Impact",Id="howitzer_impact",Desc="500% QF. The signature move."}},
+		},
+		Style = {
+			["Boxer"] = {{ReqLvl=1,Name="Quick Jab",Id="quick_jab",Desc="90% AGI. Fast priority strike."},{ReqLvl=20,Name="Body Blow",Id="body_blow",Desc="100% STR. Applies Brittle."},{ReqLvl=40,Name="Dempsey Roll",Id="dempsey_roll",Desc="130% STR AoE. Flurry of hooks."}},
+			["Dual Knives"] = {{ReqLvl=1,Name="Twin Slash",Id="twin_slash",Desc="110% AGI. Rapid cuts that apply Bleed."},{ReqLvl=25,Name="Blood Draw",Id="blood_draw",Desc="100% STR. Lifesteals 50%."},{ReqLvl=50,Name="Acrobatic Lunge",Id="acrobatic_lunge",Desc="160% AGI. Unpredictable stab."}},
+			["Sniper"] = {{ReqLvl=1,Name="Ricochet Shot",Id="ricochet_shot",Desc="130% AGI. Bounces to hit target."},{ReqLvl=25,Name="Smoke Grenade",Id="smoke_grenade",Desc="GIMMICK: AoE Blind."},{ReqLvl=50,Name="Locked-On Headshot",Id="locked_headshot",Desc="200% AGI. Un-dodgeable."}},
+			["Sumo"] = {{ReqLvl=1,Name="Hundred-Hand Slap",Id="hundred_slap",Desc="140% STR AoE."},{ReqLvl=30,Name="Unmovable Mountain",Id="unmovable_stance",Desc="BUFF: +100% Armor for 3 turns."},{ReqLvl=60,Name="Spear Charge",Id="spear_charge",Desc="220% STR. Breaks shields."}},
+			["Acrobat"] = {{ReqLvl=1,Name="Flip Kick",Id="flip_kick",Desc="95% AGI. Agile upward strike."},{ReqLvl=20,Name="Evasive Handspring",Id="evasive_spring",Desc="BUFF: Greatly increases Dodge Chance."},{ReqLvl=40,Name="Meteor Dropkick",Id="meteor_dropkick",Desc="140% AGI. High-speed impact."}},
+		}
+	}
+
+	local function getMasteryLevel(type: string)
+		local statVal = statsFolder:FindFirstChild(type .. "MasteryXP")
+		if not statVal then return 1 end
+		return math.floor(math.sqrt(statVal.Value / 100)) + 1
+	end
+
+	local function loadAvailableMoves()
+		for _, child in ipairs(availScroll.Gui:GetChildren()) do
+			if child:IsA("TextButton") then child:Destroy() end
+		end
+
+		local currentQuirk = statsFolder:WaitForChild("CurrentQuirk").Value
+		local currentStyle = statsFolder:WaitForChild("CurrentStyle").Value
+		local quirkLvl = getMasteryLevel("Quirk")
+		local styleLvl = getMasteryLevel("Style")
+
+		masteryTitle:SetText("◆ Quirk Mastery Lvl " .. quirkLvl .. "  |  Style Mastery Lvl " .. styleLvl)
+		local unlockedMoves = {}
+
+		if currentQuirk ~= "None" and currentQuirk ~= "[ NONE ]" then
+			if MasteryMilestones.Quirk[currentQuirk] then
+				for _, move in ipairs(MasteryMilestones.Quirk[currentQuirk]) do
+					table.insert(unlockedMoves, {Data = move, IsQuirk = true, Mastered = quirkLvl >= move.ReqLvl})
+				end
+			else
+				table.insert(unlockedMoves, {Data = {ReqLvl=1,Name=currentQuirk.." Alpha",Id="generic_quirk_1",Desc="Basic "..currentQuirk.." attack. 100% QF."}, IsQuirk=true, Mastered=true})
+				table.insert(unlockedMoves, {Data = {ReqLvl=20,Name=currentQuirk.." Ultimate",Id="generic_quirk_2",Desc="Heavy "..currentQuirk.." attack. 250% QF."}, IsQuirk=true, Mastered=quirkLvl>=20})
+			end
+		end
+
+		if MasteryMilestones.Style[currentStyle] then
+			for _, move in ipairs(MasteryMilestones.Style[currentStyle]) do
+				table.insert(unlockedMoves, {Data = move, IsQuirk = false, Mastered = styleLvl >= move.ReqLvl})
+			end
+		else
+			table.insert(unlockedMoves, {Data = {ReqLvl=1,Name="Basic Strike",Id="basic_strike",Desc="100% STR. Reliable physical damage."}, IsQuirk=false, Mastered=true})
+			table.insert(unlockedMoves, {Data = {ReqLvl=15,Name="Heavy Strike",Id="heavy_strike",Desc="180% STR. "..currentStyle.." mastery."}, IsQuirk=false, Mastered=styleLvl>=15})
+		end
+
+		for _, mData in ipairs(unlockedMoves) do
+			local move = mData.Data
+			local btn = UIFramework.UIButton.new("Move_"..move.Id, "", Theme.Colors.PanelHighlight, availScroll.Gui)
+			btn.Gui.Size = UDim2.new(1, 0, 0, 56)
+
+			-- Rarity stripe on left for quirk moves
+			if mData.IsQuirk and mData.Mastered then
+				local quirkStripe = Instance.new("Frame", btn.Gui)
+				quirkStripe.Size = UDim2.new(0, 3, 1, 0)
+				quirkStripe.BackgroundColor3 = RarityColors.Epic; quirkStripe.BorderSizePixel = 0
+				local qs = Instance.new("UICorner", quirkStripe); qs.CornerRadius = UDim.new(0, 4)
+			end
+
+			local mTitle = UIFramework.UILabel.new("Title", btn.Gui)
+			mTitle.Gui.Size = UDim2.new(0.7, 0, 0, 22)
+			mTitle.Gui.Position = UDim2.new(0, 12, 0, 6)
+			mTitle:SetText(move.Name)
+			mTitle.Gui.Font = Enum.Font.GothamBold
+			mTitle.Gui.TextXAlignment = Enum.TextXAlignment.Left
+			mTitle.Gui.TextSize = 13
+
+			local reqLabel = UIFramework.UILabel.new("Req", btn.Gui)
+			reqLabel.Gui.Size = UDim2.new(0.28, 0, 0, 22)
+			reqLabel.Gui.Position = UDim2.new(0.72, 0, 0, 6)
+			reqLabel:SetText("Lvl " .. move.ReqLvl)
+			reqLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+			reqLabel.Gui.Font = Enum.Font.GothamBold
+			reqLabel.Gui.TextSize = 12
+
+			local mDesc = UIFramework.UILabel.new("Desc", btn.Gui)
+			mDesc.Gui.Size = UDim2.new(1, -20, 0, 20)
+			mDesc.Gui.Position = UDim2.new(0, 12, 0, 30)
+			mDesc:SetText(move.Desc)
+			mDesc.Gui.TextSize = 11
+			mDesc.Gui.TextXAlignment = Enum.TextXAlignment.Left
+			mDesc.Gui.Font = Enum.Font.Gotham
+
+			if not mData.Mastered then
+				mTitle.Gui.TextColor3 = Theme.Colors.LockedText
+				mDesc.Gui.TextColor3 = Theme.Colors.LockedText
+				reqLabel.Gui.TextColor3 = Color3.fromRGB(200, 80, 80)
+				btn.Gui.Active = false
+				btn.Gui.BackgroundTransparency = 0.5
+			else
+				mTitle.Gui.TextColor3 = mData.IsQuirk and RarityColors.Epic or Theme.Colors.PrimaryText
+				mDesc.Gui.TextColor3 = Theme.Colors.TextMuted
+				reqLabel.Gui.TextColor3 = Color3.fromRGB(80, 220, 100)
+				applyHoverEffect(btn.Gui, 1.03, 10)
+
+				btn:OnClick(function()
+					shared_activeSlotBtns[shared_selectedSlotIndex]:SetText(move.Name)
+					EquipMoveEvent:FireServer(shared_selectedSlotIndex, move.Id)
+					showToast("✔ Equipped: " .. move.Name .. " → Slot " .. shared_selectedSlotIndex, mData.IsQuirk and RarityColors.Epic or Theme.Colors.PrimaryText)
+				end)
+			end
+		end
+	end
+
+	statsFolder:WaitForChild("CurrentQuirk").Changed:Connect(function()
+		for i, btn in ipairs(shared_activeSlotBtns) do btn:SetText("SLOT "..i); EquipMoveEvent:FireServer(i, "Empty") end
+		loadAvailableMoves()
+	end)
+	statsFolder:WaitForChild("CurrentStyle").Changed:Connect(function()
+		for i, btn in ipairs(shared_activeSlotBtns) do btn:SetText("SLOT "..i); EquipMoveEvent:FireServer(i, "Empty") end
+		loadAvailableMoves()
+	end)
+	loadAvailableMoves()
+end
+
+-- ==========================================
+-- BUILDER: COMBAT PAGE (Greatly Enhanced)
+-- ==========================================
+local function BuildCombatPage()
+	local combatPage = pages["COMBAT"]
+
+	-- Turn Order Bar
+	local turnOrderPanel = UIFramework.UIFrame.new("TurnOrder", Theme.Colors.Background, combatPage)
+	turnOrderPanel.Gui.Size = UDim2.new(1, 0, 0, 80)
+	turnOrderPanel.Gui.Position = UDim2.new(0, 0, 0, 0)
+	shared_turnOrderPanelGui = turnOrderPanel.Gui
+
+	-- "TURN ORDER" label
+	local turnOrderLabel = Instance.new("TextLabel", shared_turnOrderPanelGui)
+	turnOrderLabel.Size = UDim2.new(0, 90, 0, 20)
+	turnOrderLabel.Position = UDim2.new(0, 10, 0, 5)
+	turnOrderLabel.BackgroundTransparency = 1
+	turnOrderLabel.Text = "TURN ORDER"
+	turnOrderLabel.TextColor3 = Color3.fromRGB(115, 195, 235)
+	turnOrderLabel.Font = Enum.Font.GothamBold
+	turnOrderLabel.TextSize = 10
+	turnOrderLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+	local turnOrderLayout = Instance.new("UIListLayout", shared_turnOrderPanelGui)
+	turnOrderLayout.FillDirection = Enum.FillDirection.Horizontal
+	turnOrderLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	turnOrderLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	turnOrderLayout.Padding = UDim.new(0, 12)
+
+	-- Battlefield
+	local battlefieldFrame = Instance.new("Frame", combatPage)
+	battlefieldFrame.Name = "Battlefield"
+	battlefieldFrame.Size = UDim2.new(1, 0, 1, -275)
+	battlefieldFrame.Position = UDim2.new(0, 0, 0, 80)
+	battlefieldFrame.BackgroundTransparency = 1
+
+	-- VS label in the center
+	local vsLabel = Instance.new("TextLabel", battlefieldFrame)
+	vsLabel.Size = UDim2.new(0, 60, 0, 60)
+	vsLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+	vsLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
+	vsLabel.BackgroundTransparency = 1
+	vsLabel.Text = "VS"
+	vsLabel.TextColor3 = Color3.fromRGB(60, 60, 80)
+	vsLabel.Font = Enum.Font.GothamBlack
+	vsLabel.TextSize = 32
+
+	-- Allies label
+	local alliesLabel = Instance.new("TextLabel", battlefieldFrame)
+	alliesLabel.Size = UDim2.new(0.4, 0, 0, 20)
+	alliesLabel.Position = UDim2.new(0.05, 0, 0, 4)
+	alliesLabel.BackgroundTransparency = 1
+	alliesLabel.Text = "◆ ALLIES"
+	alliesLabel.TextColor3 = Color3.fromRGB(80, 220, 100)
+	alliesLabel.Font = Enum.Font.GothamBold
+	alliesLabel.TextSize = 11
+	alliesLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+	-- Enemies label
+	local enemiesLabel = Instance.new("TextLabel", battlefieldFrame)
+	enemiesLabel.Size = UDim2.new(0.4, 0, 0, 20)
+	enemiesLabel.Position = UDim2.new(0.55, 0, 0, 4)
+	enemiesLabel.BackgroundTransparency = 1
+	enemiesLabel.Text = "◆ ENEMIES"
+	enemiesLabel.TextColor3 = Color3.fromRGB(220, 80, 80)
+	enemiesLabel.Font = Enum.Font.GothamBold
+	enemiesLabel.TextSize = 11
+	enemiesLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+	shared_alliesContainer = Instance.new("Frame", battlefieldFrame)
+	shared_alliesContainer.Name = "Allies"
+	shared_alliesContainer.Size = UDim2.new(0.42, 0, 1, -28)
+	shared_alliesContainer.Position = UDim2.new(0.04, 0, 0, 26)
+	shared_alliesContainer.BackgroundTransparency = 1
+	local alliesLayout = Instance.new("UIListLayout", shared_alliesContainer)
+	alliesLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	alliesLayout.Padding = UDim.new(0, 16)
+
+	shared_enemiesContainer = Instance.new("Frame", battlefieldFrame)
+	shared_enemiesContainer.Name = "Enemies"
+	shared_enemiesContainer.Size = UDim2.new(0.42, 0, 1, -28)
+	shared_enemiesContainer.Position = UDim2.new(0.54, 0, 0, 26)
+	shared_enemiesContainer.BackgroundTransparency = 1
+	local enemiesLayout = Instance.new("UIListLayout", shared_enemiesContainer)
+	enemiesLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	enemiesLayout.Padding = UDim.new(0, 16)
+
+	-- Combat Log Panel (improved)
+	local combatLogPanel = UIFramework.UIFrame.new("CombatLog", Theme.Colors.Background, combatPage)
+	combatLogPanel.Gui.Size = UDim2.new(1, -40, 0, 50)
+	combatLogPanel.Gui.AnchorPoint = Vector2.new(0.5, 1)
+	combatLogPanel.Gui.Position = UDim2.new(0.5, 0, 1, -158)
+
+	-- "CLICK TO SKIP" hint
+	local skipHint = Instance.new("TextLabel", combatLogPanel.Gui)
+	skipHint.Size = UDim2.new(0, 80, 0, 14)
+	skipHint.AnchorPoint = Vector2.new(1, 0)
+	skipHint.Position = UDim2.new(1, -6, 0, 4)
+	skipHint.BackgroundTransparency = 1
+	skipHint.Text = "[ CLICK TO SKIP ]"
+	skipHint.TextColor3 = Color3.fromRGB(80, 80, 100)
+	skipHint.Font = Enum.Font.Gotham
+	skipHint.TextSize = 9
+
+	local skipLogBtn = Instance.new("TextButton", combatLogPanel.Gui)
+	skipLogBtn.Size = UDim2.new(1, 0, 1, 0)
+	skipLogBtn.BackgroundTransparency = 1
+	skipLogBtn.Text = ""
+	skipLogBtn.ZIndex = 10
+	shared_skipLogBtn = skipLogBtn
+
+	local clt = UIFramework.UILabel.new("LogText", combatLogPanel.Gui)
+	clt.Gui.Size = UDim2.new(1, -20, 1, -10)
+	clt.Gui.Position = UDim2.new(0, 10, 0, 5)
+	clt:SetText("Awaiting deployment...")
+	clt.Gui.TextWrapped = true
+	clt.Gui.TextSize = 13
+	clt.Gui.TextColor3 = Theme.Colors.PrimaryText
+	clt.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	clt.Gui.TextYAlignment = Enum.TextYAlignment.Center
+	clt.Gui.RichText = true
+	clt.Gui.Font = Enum.Font.Gotham
+	shared_combatLogText = clt
+
+	-- Moves Panel
+	local movesPanel = UIFramework.UIFrame.new("MovesPanel", Theme.Colors.Panel, combatPage)
+	movesPanel.Gui.Size = UDim2.new(1, 0, 0, 150)
+	movesPanel.Gui.AnchorPoint = Vector2.new(0, 1)
+	movesPanel.Gui.Position = UDim2.new(0, 0, 1, 0)
+
+	-- "YOUR TURN / WAITING" indicator
+	local turnIndicator = Instance.new("TextLabel", movesPanel.Gui)
+	turnIndicator.Size = UDim2.new(0, 160, 0, 18)
+	turnIndicator.Position = UDim2.new(0, 20, 0, 4)
+	turnIndicator.BackgroundTransparency = 1
+	turnIndicator.Text = "WAITING FOR TURN..."
+	turnIndicator.TextColor3 = Color3.fromRGB(100, 100, 120)
+	turnIndicator.Font = Enum.Font.GothamBold
+	turnIndicator.TextSize = 10
+	turnIndicator.TextXAlignment = Enum.TextXAlignment.Left
+
+	local movesScroll = UIFramework.UIScrollFrame.new("MovesScroll", Theme.Colors.Panel, movesPanel.Gui)
+	movesScroll.Gui.Size = UDim2.new(1, -40, 1, -28)
+	movesScroll.Gui.Position = UDim2.new(0, 20, 0, 22)
+	movesScroll.Gui.CanvasSize = UDim2.new(0, 0, 0, 0)
+	movesScroll.Gui.AutomaticCanvasSize = Enum.AutomaticSize.X
+	movesScroll.Gui.ScrollBarThickness = 6
+	shared_movesScrollGui = movesScroll.Gui
+
+	local movesLayout = Instance.new("UIListLayout", shared_movesScrollGui)
+	movesLayout.FillDirection = Enum.FillDirection.Horizontal
+	movesLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	movesLayout.Padding = UDim.new(0, 12)
+	movesLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	-- Result Overlay
+	shared_resultOverlay = Instance.new("Frame", combatPage)
+	shared_resultOverlay.Size = UDim2.new(1, 0, 1, 0)
+	shared_resultOverlay.BackgroundColor3 = Color3.fromRGB(8, 8, 14)
+	shared_resultOverlay.BackgroundTransparency = 0.08
+	shared_resultOverlay.Visible = false
+	shared_resultOverlay.ZIndex = 50
+
+	local resultPanel = UIFramework.UIFrame.new("ResultPanel", Theme.Colors.Panel, shared_resultOverlay)
+	resultPanel.Gui.Size = UDim2.new(0, 440, 0, 320)
+	resultPanel.Gui.AnchorPoint = Vector2.new(0.5, 0.5)
+	resultPanel.Gui.Position = UDim2.new(0.5, 0, 0.5, 0)
+
+	local resultAccent = Instance.new("Frame", resultPanel.Gui)
+	resultAccent.Size = UDim2.new(1, 0, 0, 4)
+	resultAccent.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+	resultAccent.BorderSizePixel = 0
+
+	shared_resultTitle = UIFramework.UILabel.new("Title", resultPanel.Gui)
+	shared_resultTitle.Gui.Size = UDim2.new(1, 0, 0, 55)
+	shared_resultTitle.Gui.Position = UDim2.new(0, 0, 0, 14)
+	shared_resultTitle.Gui.Font = Enum.Font.GothamBlack
+	shared_resultTitle.Gui.TextSize = 36
+
+	shared_resultDesc = UIFramework.UILabel.new("Desc", resultPanel.Gui)
+	shared_resultDesc.Gui.Size = UDim2.new(1, -40, 0, 28)
+	shared_resultDesc.Gui.Position = UDim2.new(0, 20, 0, 72)
+	shared_resultDesc.Gui.TextColor3 = Theme.Colors.TextMuted
+	shared_resultDesc.Gui.Font = Enum.Font.Gotham
+	shared_resultDesc.Gui.TextSize = 14
+
+	shared_rewardsContainer = Instance.new("Frame", resultPanel.Gui)
+	shared_rewardsContainer.Size = UDim2.new(1, -40, 0, 130)
+	shared_rewardsContainer.Position = UDim2.new(0, 20, 0, 108)
+	shared_rewardsContainer.BackgroundTransparency = 1
+	local rewardsLayout = Instance.new("UIListLayout", shared_rewardsContainer)
+	rewardsLayout.Padding = UDim.new(0, 6)
+
+	local exitCombatBtn = UIFramework.UIButton.new("ExitBtn", "◀  RETURN TO MAP", Theme.Colors.PanelHighlight, resultPanel.Gui)
+	exitCombatBtn.Gui.Size = UDim2.new(0, 220, 0, 42)
+	exitCombatBtn.Gui.AnchorPoint = Vector2.new(0.5, 1)
+	exitCombatBtn.Gui.Position = UDim2.new(0.5, 0, 1, -16)
+	exitCombatBtn.Gui.Font = Enum.Font.GothamBold
+	exitCombatBtn.Gui.TextSize = 14
+	applyHoverEffect(exitCombatBtn.Gui, 1.05, 18)
+
+	exitCombatBtn:OnClick(function()
+		shared_resultOverlay.Visible = false
+		clearContainer(shared_turnOrderPanelGui)
+		clearContainer(shared_enemiesContainer)
+		clearContainer(shared_alliesContainer)
+		clearContainer(shared_movesScrollGui)
+
+		if shared_combatLogText then
+			shared_combatLogText:SetText("Awaiting deployment...")
+		end
+
+		switchTab("MISSIONS")
+		if shared_mapOverlay then shared_mapOverlay.Visible = true end
+	end)
+
+	shared_turnIndicator = turnIndicator
+end
+
+-- ==========================================
+-- COMBAT HELPER FUNCTIONS
+-- ==========================================
+local function addToTurnOrder(portraitId: string, isEnemy: boolean, isActive: boolean)
+	local frame = Instance.new("Frame", shared_turnOrderPanelGui)
+	local baseSize = isActive and 58 or 46
+	frame.Size = UDim2.new(0, baseSize, 0, baseSize)
+	frame.BackgroundColor3 = isEnemy and Color3.fromRGB(200, 45, 45) or Color3.fromRGB(40, 200, 70)
+	frame.BorderSizePixel = 0
+	local corner = Instance.new("UICorner", frame); corner.CornerRadius = UDim.new(1, 0)
+
+	if isActive then
+		local glow = Instance.new("UIStroke", frame)
+		glow.Color = Color3.fromRGB(255, 255, 255)
+		glow.Thickness = 3
+		-- Pulsing glow for active combatant in turn order
+		task.spawn(function()
+			while frame.Parent do
+				TweenService:Create(glow, TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {Transparency = 0.5}):Play()
+				task.wait(2)
+			end
+		end)
+	end
+
+	local img = Instance.new("ImageLabel", frame)
+	img.Size = UDim2.new(1, -4, 1, -4)
+	img.Position = UDim2.new(0, 2, 0, 2)
+	img.Image = portraitId
+	img.BackgroundTransparency = 1
+	local imgCorner = Instance.new("UICorner", img); imgCorner.CornerRadius = UDim.new(1, 0)
+end
+
+local function createCombatant(name: string, isEnemy: boolean, maxHp: number, portraitId: string, isBoss: boolean?)
+	local container = isEnemy and shared_enemiesContainer or shared_alliesContainer
+
+	local cardHeight = isBoss and 100 or 82
+	local card = UIFramework.UIFrame.new("Card_"..name, Theme.Colors.Background, container)
+	card.Gui.Size = UDim2.new(1, 0, 0, cardHeight)
+
+	if isBoss then
+		local bossStroke = Instance.new("UIStroke", card.Gui)
+		bossStroke.Color = Color3.fromRGB(255, 80, 80)
+		bossStroke.Thickness = 2
+		bossStroke.Transparency = 0.3
+
+		-- Boss label badge
+		local bossBadge = Instance.new("Frame", card.Gui)
+		bossBadge.Size = UDim2.new(0, 40, 0, 16)
+		bossBadge.AnchorPoint = Vector2.new(1, 0)
+		bossBadge.Position = UDim2.new(1, -5, 0, 5)
+		bossBadge.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+		bossBadge.BorderSizePixel = 0
+		local bbCorner = Instance.new("UICorner", bossBadge); bbCorner.CornerRadius = UDim.new(0, 4)
+		local bbLabel = Instance.new("TextLabel", bossBadge)
+		bbLabel.Size = UDim2.new(1, 0, 1, 0)
+		bbLabel.BackgroundTransparency = 1
+		bbLabel.Text = "BOSS"
+		bbLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+		bbLabel.Font = Enum.Font.GothamBlack
+		bbLabel.TextSize = 9
+	end
+
+	local uiScale = Instance.new("UIScale", card.Gui)
+
+	local portraitSize = isBoss and 80 or 62
+	local portraitFrame = Instance.new("Frame", card.Gui)
+	portraitFrame.Size = UDim2.new(0, portraitSize, 0, portraitSize)
+	portraitFrame.Position = UDim2.new(0, 8, 0, (cardHeight - portraitSize)/2)
+	portraitFrame.BackgroundColor3 = Theme.Colors.PanelHighlight
+	portraitFrame.BorderSizePixel = 0
+	local pCorner = Instance.new("UICorner", portraitFrame); pCorner.CornerRadius = UDim.new(1, 0)
+
+	local portrait = Instance.new("ImageLabel", portraitFrame)
+	portrait.Size = UDim2.new(1, -4, 1, -4)
+	portrait.Position = UDim2.new(0, 2, 0, 2)
+	portrait.Image = portraitId
+	portrait.BackgroundTransparency = 1
+	local imgCorner = Instance.new("UICorner", portrait); imgCorner.CornerRadius = UDim.new(1, 0)
+
+	local statusRing = Instance.new("UIStroke", portraitFrame)
+	statusRing.Thickness = 3
+	statusRing.Transparency = 1
+
+	local infoX = portraitSize + 16
+	local nameLabel = UIFramework.UILabel.new("Name", card.Gui)
+	nameLabel.Gui.Size = UDim2.new(1, -(infoX + 10), 0, 24)
+	nameLabel.Gui.Position = UDim2.new(0, infoX, 0, 10)
+	nameLabel:SetText(name)
+	nameLabel.Gui.Font = Enum.Font.GothamBold
+	nameLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.Gui.TextSize = isBoss and 15 or 13
+
+	local hpBar = UIFramework.UIProgressBar.new("HPBar", card.Gui)
+	hpBar.Gui.Size = UDim2.new(1, -(infoX + 10), 0, 14)
+	hpBar.Gui.Position = UDim2.new(0, infoX, 0, 40)
+	hpBar:SetProgress(1)
+	local hpFill = hpBar.Gui:FindFirstChildWhichIsA("Frame")
+	if hpFill then
+		hpFill.BackgroundColor3 = isEnemy and Color3.fromRGB(220, 50, 50) or Color3.fromRGB(50, 220, 80)
+	end
+
+	local hpText = UIFramework.UILabel.new("HPText", hpBar.Gui)
+	hpText.Gui.Size = UDim2.new(1, 0, 1, 0)
+	hpText.Gui.ZIndex = 2
+	hpText:SetText(maxHp .. " / " .. maxHp)
+	hpText.Gui.TextSize = 10
+	hpText.Gui.Font = Enum.Font.GothamBold
+	hpText.Gui.TextColor3 = Color3.fromRGB(255, 255, 255)
+
+	-- Status badge row
+	local statusBadgeFrame = Instance.new("Frame", card.Gui)
+	statusBadgeFrame.Size = UDim2.new(1, -(infoX + 10), 0, 16)
+	statusBadgeFrame.Position = UDim2.new(0, infoX, 0, 58)
+	statusBadgeFrame.BackgroundTransparency = 1
+	local statusLayout = Instance.new("UIListLayout", statusBadgeFrame)
+	statusLayout.FillDirection = Enum.FillDirection.Horizontal
+	statusLayout.Padding = UDim.new(0, 4)
+
+	local statusBadge = Instance.new("TextLabel", statusBadgeFrame)
+	statusBadge.Size = UDim2.new(0, 0, 1, 0)
+	statusBadge.AutomaticSize = Enum.AutomaticSize.X
+	statusBadge.BackgroundTransparency = 1
+	statusBadge.Text = ""
+	statusBadge.Font = Enum.Font.GothamBold
+	statusBadge.TextSize = 11
+
+	local turnStroke = Instance.new("UIStroke", card.Gui)
+	turnStroke.Color = Theme.Colors.PrimaryText
+	turnStroke.Thickness = 2
+	turnStroke.Transparency = 1
+
+	local statusIcons = {
+		Burn = {icon = "🔥", color = Color3.fromRGB(255, 100, 0)},
+		Bleed = {icon = "🩸", color = Color3.fromRGB(200, 0, 0)},
+		Stun = {icon = "⚡", color = Color3.fromRGB(255, 255, 0)},
+		Erasure = {icon = "🚫", color = Color3.fromRGB(150, 150, 150)},
+		Gravity = {icon = "⬇", color = Color3.fromRGB(180, 80, 255)},
+		Brittle = {icon = "💢", color = Color3.fromRGB(180, 120, 50)},
+	}
+
+	local function applyStatus(statusType: string)
+		local info = statusIcons[statusType]
+		if info then
+			statusRing.Transparency = 0
+			statusRing.Color = info.color
+			nameLabel.Gui.TextColor3 = info.color
+			statusBadge.Text = info.icon .. " " .. statusType:upper()
+			statusBadge.TextColor3 = info.color
+		else
+			statusRing.Transparency = 1
+			nameLabel.Gui.TextColor3 = Theme.Colors.PrimaryText
+			statusBadge.Text = ""
+		end
+	end
+
+	local function triggerDamage()
+		portraitFrame.BackgroundColor3 = Color3.fromRGB(255, 40, 40)
+		TweenService:Create(portraitFrame, TweenInfo.new(0.45), {BackgroundColor3 = Theme.Colors.PanelHighlight}):Play()
+		TweenService:Create(card.Gui, TweenInfo.new(0.05), {Rotation = 3}):Play()
+		TweenService:Create(uiScale, TweenInfo.new(0.05), {Scale = 0.94}):Play()
+		task.wait(0.05)
+		TweenService:Create(card.Gui, TweenInfo.new(0.05), {Rotation = -3}):Play()
+		task.wait(0.05)
+		TweenService:Create(card.Gui, TweenInfo.new(0.08), {Rotation = 0}):Play()
+		TweenService:Create(uiScale, TweenInfo.new(0.12), {Scale = 1}):Play()
+	end
+
+	return {
+		Card = card.Gui,
+		ApplyStatus = applyStatus,
+		HPBar = hpBar,
+		HPText = hpText,
+		TriggerDamage = triggerDamage,
+		TurnStroke = turnStroke,
+		Portrait = portraitFrame
+	}
+end
+
+local function createMove(order: number, moveName: string, moveType: string, desc: string, isQuirk: boolean)
+	local btn = UIFramework.UIButton.new("Move_"..moveName, "", Theme.Colors.PanelHighlight, shared_movesScrollGui)
+	btn.Gui.Size = UDim2.new(0, 210, 1, -20)
+	btn.Gui.LayoutOrder = order
+	btn:SetText("")
+	applyHoverEffect(btn.Gui, 1.04, 10)
+
+	-- Type color stripe
+	local typeColor = isQuirk and RarityColors.Epic or Theme.Colors.ObjectiveText
+	local typeBar = Instance.new("Frame", btn.Gui)
+	typeBar.Size = UDim2.new(1, 0, 0, 4)
+	typeBar.BackgroundColor3 = typeColor; typeBar.BorderSizePixel = 0
+
+	local title = UIFramework.UILabel.new("Title", btn.Gui)
+	title.Gui.Size = UDim2.new(1, -20, 0, 26)
+	title.Gui.Position = UDim2.new(0, 10, 0, 10)
+	title:SetText(moveName)
+	title.Gui.Font = Enum.Font.GothamBold
+	title.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	title.Gui.TextSize = 14
+
+	local typeLabel = UIFramework.UILabel.new("Type", btn.Gui)
+	typeLabel.Gui.Size = UDim2.new(1, -20, 0, 18)
+	typeLabel.Gui.Position = UDim2.new(0, 10, 0, 36)
+	typeLabel:SetText("[" .. moveType .. "]")
+	typeLabel.Gui.TextColor3 = typeColor
+	typeLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	typeLabel.Gui.Font = Enum.Font.GothamBold
+	typeLabel.Gui.TextSize = 11
+
+	local descLabel = UIFramework.UILabel.new("Desc", btn.Gui)
+	descLabel.Gui.Size = UDim2.new(1, -20, 0, 44)
+	descLabel.Gui.Position = UDim2.new(0, 10, 0, 58)
+	descLabel:SetText(desc)
+	descLabel.Gui.TextColor3 = Theme.Colors.TextMuted
+	descLabel.Gui.TextSize = 11
+	descLabel.Gui.TextWrapped = true
+	descLabel.Gui.TextXAlignment = Enum.TextXAlignment.Left
+	descLabel.Gui.Font = Enum.Font.Gotham
+
+	local auraStroke = Instance.new("UIStroke", btn.Gui)
+	auraStroke.Thickness = 3
+	auraStroke.Transparency = 1
+
+	local crossOut = Instance.new("Frame", btn.Gui)
+	crossOut.Size = UDim2.new(1, 0, 0, 4)
+	crossOut.Position = UDim2.new(0, 0, 0.5, -2)
+	crossOut.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+	crossOut.Rotation = 15
+	crossOut.Visible = false
+
+	local function setMoveState(state: string)
+		if state == "Normal" then
+			auraStroke.Transparency = 1
+			crossOut.Visible = false
+			title.Gui.TextColor3 = Theme.Colors.PrimaryText
+		elseif state == "FullCowling" then
+			auraStroke.Color = Color3.fromRGB(50, 255, 100)
+			auraStroke.Transparency = 0
+		elseif state == "Erasure" and isQuirk then
+			crossOut.Visible = true
+			title.Gui.TextColor3 = Theme.Colors.LockedText
+			typeLabel.Gui.TextColor3 = Theme.Colors.LockedText
+		end
+	end
+
+	return { Button = btn, SetState = setMoveState }
+end
+
+-- ==========================================
+-- COMBAT STATE MANAGER (SERVER -> CLIENT)
+-- ==========================================
+local combatantCards = {}
+local selectedTargetId = nil
+
+local function updateCombatUI(combatState)
+	if not combatState.IsActive and combatState.Result then
+		shared_resultOverlay.Visible = true
+
+		for _, child in ipairs(shared_rewardsContainer:GetChildren()) do
+			if child:IsA("TextLabel") or child:IsA("Frame") then child:Destroy() end
+		end
+
+		if combatState.Result.Type == "Victory" then
+			shared_resultTitle:SetText("⚡ VICTORY!")
+			shared_resultTitle.Gui.TextColor3 = Color3.fromRGB(255, 215, 0)
+			shared_resultDesc:SetText("Zone cleared. Rewards acquired:")
+
+			local resultAccent = shared_resultOverlay:FindFirstChild("ResultPanel") and shared_resultOverlay.ResultPanel:FindFirstChild("Frame")
+			if resultAccent then resultAccent.BackgroundColor3 = Color3.fromRGB(255, 215, 0) end
+
+			for rewardName, amount in pairs(combatState.Result.Rewards) do
+				local rewardRow = Instance.new("Frame", shared_rewardsContainer)
+				rewardRow.Size = UDim2.new(1, 0, 0, 28)
+				rewardRow.BackgroundColor3 = Color3.fromRGB(20, 30, 20)
+				rewardRow.BorderSizePixel = 0
+				local rrc = Instance.new("UICorner", rewardRow); rrc.CornerRadius = UDim.new(0, 6)
+
+				local rLabel = Instance.new("TextLabel", rewardRow)
+				rLabel.Size = UDim2.new(1, -16, 1, 0)
+				rLabel.Position = UDim2.new(0, 10, 0, 0)
+				rLabel.BackgroundTransparency = 1
+				rLabel.Text = "+ " .. amount .. "  " .. rewardName
+				rLabel.TextColor3 = Color3.fromRGB(80, 220, 100)
+				rLabel.Font = Enum.Font.GothamBold
+				rLabel.TextSize = 13
+				rLabel.TextXAlignment = Enum.TextXAlignment.Left
+			end
+
+			showToast("⚡ VICTORY! Zone cleared!", Color3.fromRGB(255, 215, 0), 4)
+		else
+			shared_resultTitle:SetText("✕ DEFEAT")
+			shared_resultTitle.Gui.TextColor3 = Color3.fromRGB(220, 50, 50)
+			shared_resultDesc:SetText("Your team was wiped out. Train harder and retry.")
+			showToast("💀 Defeated... Review your loadout and try again.", Color3.fromRGB(220, 80, 80), 4)
+		end
+
+		combatantCards = {}
+		selectedTargetId = nil
+		return
+	end
+
+	-- Clear and rebuild turn order
+	for _, child in ipairs(shared_turnOrderPanelGui:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+
+	for _, combatantId in ipairs(combatState.TurnQueue) do
+		local data = combatState.Combatants[combatantId]
+		if data then
+			addToTurnOrder(data.Portrait, data.IsEnemy, combatantId == combatState.ActiveTurn)
+		end
+	end
+
+	local firstAliveEnemy = nil
+	local allyCount = 0
+	local isMyTurn = (combatState.ActiveTurn == player.Name)
+
+	-- Update turn indicator text in combat moves panel
+	if shared_turnIndicator then
+		if isMyTurn then
+			shared_turnIndicator.Text = "⚡ YOUR TURN — SELECT A MOVE"
+			shared_turnIndicator.TextColor3 = Color3.fromRGB(80, 220, 100)
+		else
+			shared_turnIndicator.Text = "WAITING FOR TURN..."
+			shared_turnIndicator.TextColor3 = Color3.fromRGB(100, 100, 120)
+		end
+	end
+
+	for id, data in pairs(combatState.Combatants) do
+		local cardData = combatantCards[id]
+
+		if not data.IsEnemy then allyCount += 1 end
+
+		if not cardData then
+			local isBoss = data.IsBoss or false
+			cardData = createCombatant(data.Name, data.IsEnemy, data.MaxHP, data.Portrait, isBoss)
+			cardData.CurrentHP = data.HP
+			combatantCards[id] = cardData
+
+			if data.IsEnemy then
+				local targetBtn = Instance.new("TextButton", cardData.Card)
+				targetBtn.Size = UDim2.new(1, 0, 1, 0)
+				targetBtn.BackgroundTransparency = 1
+				targetBtn.Text = ""
+				targetBtn.ZIndex = 5
+
+				targetBtn.MouseButton1Click:Connect(function()
+					if combatState.Combatants[id] and combatState.Combatants[id].HP > 0 then
+						selectedTargetId = id
+						for eId, eCard in pairs(combatantCards) do
+							if combatState.Combatants[eId] and combatState.Combatants[eId].IsEnemy then
+								if eId == selectedTargetId then
+									eCard.TurnStroke.Color = Color3.fromRGB(255, 50, 50)
+									eCard.TurnStroke.Transparency = 0
+								else
+									eCard.TurnStroke.Transparency = 1
+								end
+							end
+						end
+					end
+				end)
+			end
+		end
+
+		local hpPercent = math.clamp(data.HP / data.MaxHP, 0, 1)
+		if data.HP < (cardData.CurrentHP or data.MaxHP) then
+			cardData.TriggerDamage()
+			-- Spawn floating damage number above the card
+			local dmgAmount = (cardData.CurrentHP or data.MaxHP) - data.HP
+			if dmgAmount > 0 and floatingTextLayer then
+				-- Estimate screen position from card AbsolutePosition
+				task.spawn(function()
+					RunService.RenderStepped:Wait()
+					local absPos = cardData.Card.AbsolutePosition
+					local absSize = cardData.Card.AbsoluteSize
+					local screenCenter = UDim2.new(
+						0, absPos.X + absSize.X / 2,
+						0, absPos.Y + 20
+					)
+					-- Convert to scale
+					local vp = game.Workspace.CurrentCamera.ViewportSize
+					local scaledPos = UDim2.new(
+						(absPos.X + absSize.X / 2) / vp.X, 0,
+						(absPos.Y + 20) / vp.Y, 0
+					)
+					local isCrit = dmgAmount > data.MaxHP * 0.15
+					spawnFloatingText(
+						(isCrit and "💥 " or "") .. "-" .. math.floor(dmgAmount),
+						data.IsEnemy and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(255, 200, 80),
+						scaledPos,
+						isCrit
+					)
+				end)
+			end
+		end
+
+		cardData.CurrentHP = data.HP
+		cardData.HPBar:SetProgress(hpPercent)
+		if cardData.HPText then
+			cardData.HPText:SetText(math.floor(data.HP) .. "/" .. math.floor(data.MaxHP))
+		end
+
+		local statusType = type(data.Status) == "table" and data.Status.Type or data.Status
+		cardData.ApplyStatus(statusType or "Normal")
+
+		if data.IsEnemy and data.HP > 0 and not firstAliveEnemy then
+			firstAliveEnemy = id
+		end
+
+		if id == combatState.ActiveTurn then
+			cardData.TurnStroke.Color = Color3.fromRGB(255, 255, 100)
+			cardData.TurnStroke.Transparency = 0
+		elseif data.IsEnemy and id == selectedTargetId then
+			cardData.TurnStroke.Color = Color3.fromRGB(255, 50, 50)
+			cardData.TurnStroke.Transparency = 0
+		else
+			cardData.TurnStroke.Transparency = 1
+		end
+	end
+
+	if (not selectedTargetId or (combatState.Combatants[selectedTargetId] and combatState.Combatants[selectedTargetId].HP <= 0)) and firstAliveEnemy then
+		selectedTargetId = firstAliveEnemy
+		if combatantCards[selectedTargetId] then
+			combatantCards[selectedTargetId].TurnStroke.Color = Color3.fromRGB(255, 50, 50)
+			combatantCards[selectedTargetId].TurnStroke.Transparency = 0
+		end
+	end
+
+	for id, cardData in pairs(combatantCards) do
+		if not combatState.Combatants[id] then
+			cardData.Card:Destroy()
+			combatantCards[id] = nil
+		end
+	end
+
+	clearContainer(shared_movesScrollGui)
+
+	for i, move in ipairs(combatState.AvailableMoves) do
+		local moveData = createMove(i, move.Name, move.Type, move.Desc, move.IsQuirk)
+		moveData.SetState(move.State)
+
+		if not isMyTurn or move.State == "Erasure" then
+			moveData.Button.Gui.Active = false
+			moveData.Button.Gui.BackgroundTransparency = 0.6
+		else
+			moveData.Button:OnClick(function()
+				if selectedTargetId then
+					CombatActionEvent:FireServer(move.Id, selectedTargetId)
+					for _, child in ipairs(shared_movesScrollGui:GetChildren()) do
+						if child:IsA("TextButton") then
+							child.Active = false
+							child.BackgroundTransparency = 0.6
+						end
+					end
+				end
+			end)
+		end
+	end
+
+	if combatState.LogMessage and combatState.LogMessage ~= "" then
+		if shared_combatLogText then
+			local currentAnimTicket = os.clock()
+			shared_combatLogText.Gui:SetAttribute("AnimTicket", currentAnimTicket)
+			shared_combatLogText:SetText(combatState.LogMessage)
+			RunService.RenderStepped:Wait()
+
+			local cleanTextLength = utf8.len(shared_combatLogText.Gui.ContentText) or string.len(shared_combatLogText.Gui.ContentText)
+
+			local isSoloPlay = (allyCount == 1)
+			local skipConnection
+			if isSoloPlay and shared_skipLogBtn then
+				skipConnection = shared_skipLogBtn.MouseButton1Click:Connect(function()
+					shared_combatLogText.Gui:SetAttribute("AnimTicket", -1)
+					shared_combatLogText.Gui.MaxVisibleGraphemes = cleanTextLength
+				end)
+			end
+
+			task.spawn(function()
+				shared_combatLogText.Gui.MaxVisibleGraphemes = 0
+				for i = 1, cleanTextLength do
+					if shared_combatLogText.Gui:GetAttribute("AnimTicket") ~= currentAnimTicket then break end
+					shared_combatLogText.Gui.MaxVisibleGraphemes = i
+					task.wait(0.005)
+				end
+				shared_combatLogText.Gui.MaxVisibleGraphemes = cleanTextLength
+				if skipConnection then skipConnection:Disconnect() end
+			end)
+		end
+	end
+end
+
+-- ==========================================
+-- EXECUTE BUILDERS & START APP
+-- ==========================================
+BuildTopBarCurrencies()
+BuildGachaSystem()
+BuildHomePage()
+BuildHeroSetPage()
+BuildMissionsPage()
+BuildInventoryPage()
+BuildCombatPage()
+
+CombatUpdateEvent.OnClientEvent:Connect(updateCombatUI)
+
+switchTab("HOME")
+
+-- Welcome toast on load
+task.delay(0.8, function()
+	showToast("Welcome back, " .. player.Name .. "! Plus Ultra!", Color3.fromRGB(115, 195, 235), 3.5)
+end)
