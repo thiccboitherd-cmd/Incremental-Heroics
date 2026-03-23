@@ -1,0 +1,736 @@
+-- ServerScriptService/CombatServer.lua
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local StartCombatEvent = ReplicatedStorage:FindFirstChild("StartCombatEvent") or Instance.new("RemoteEvent", ReplicatedStorage)
+StartCombatEvent.Name = "StartCombatEvent"
+local CombatUpdateEvent = ReplicatedStorage:FindFirstChild("CombatUpdateEvent") or Instance.new("RemoteEvent", ReplicatedStorage)
+CombatUpdateEvent.Name = "CombatUpdateEvent"
+local CombatActionEvent = ReplicatedStorage:FindFirstChild("CombatActionEvent") or Instance.new("RemoteEvent", ReplicatedStorage)
+CombatActionEvent.Name = "CombatActionEvent"
+local EquipMoveEvent = ReplicatedStorage:FindFirstChild("EquipMoveEvent") or Instance.new("RemoteEvent", ReplicatedStorage)
+EquipMoveEvent.Name = "EquipMoveEvent"
+local EquipGearEvent = ReplicatedStorage:FindFirstChild("EquipGearEvent") or Instance.new("RemoteEvent", ReplicatedStorage)
+EquipGearEvent.Name = "EquipGearEvent"
+
+-- ==========================================
+-- GEAR & ENEMY DATABASES
+-- ==========================================
+local GearDatabase = {
+	["Steel Pipe"] = { Stats = { STR = 15, AGI = 0, END = 0, QF = 0 } },
+	["Stun Baton"] = { Stats = { STR = 5, AGI = 0, END = 0, QF = 15 } },
+	["Gym Shirt"] = { Stats = { STR = 0, AGI = 5, END = 10, QF = 0 } },
+	["Heavy Vest"] = { Stats = { STR = 0, AGI = -5, END = 50, QF = 0 } },
+	["Cooling Vents"] = { Stats = { STR = 0, AGI = 10, END = 0, QF = 20 } }
+}
+
+local EnemyTemplates = {
+	["1-Pointer"] = { 
+		Name = "1-Pt Faux Villain", HP = 300, Stats = {STR=30, AGI=20, END=30, QF=0}, 
+		Moves = {"basic_strike"}, Points = 1, Rewards = {TrainingXP=100, Spins=100, MasteryXP=20},
+		Portrait = "rbxassetid://10654202353"
+	},
+	["2-Pointer"] = { 
+		Name = "2-Pt Faux Villain", HP = 600, Stats = {STR=50, AGI=30, END=50, QF=0}, 
+		Moves = {"basic_strike", "heavy_strike"}, Points = 2, Rewards = {TrainingXP=250, MasteryXP=40},
+		Portrait = "rbxassetid://10654202353"
+	},
+	["3-Pointer"] = { 
+		Name = "3-Pt Faux Villain", HP = 1000, Stats = {STR=80, AGI=40, END=80, QF=0}, 
+		Moves = {"brutal_hook", "basic_strike"}, Points = 3, Rewards = {TrainingXP=400, MasteryXP=70},
+		Portrait = "rbxassetid://10654202353"
+	},
+	["0-Pointer"] = { 
+		Name = "Zero-Pointer Boss", HP = 3000, Stats = {STR=150, AGI=10, END=120, QF=0}, 
+		Moves = {"brutal_hook", "heavy_strike"}, Points = 10, Rewards = {TrainingXP=1500, MasteryXP=300}, 
+		IsBoss = true, Portrait = "rbxassetid://10654202353"
+	},
+	["Present Mic"] = { 
+		Name = "Secret Boss: Present Mic", HP = 3500, Stats = {STR=50, AGI=150, END=80, QF=200}, 
+		Moves = {"voice_shout", "sound_wave", "basic_strike"}, Points = 50, 
+		Rewards = {TrainingXP=2000, Spins=5, HeroCoins=1000}, Portrait = "rbxassetid://16766440266"
+	}
+}
+
+EquipGearEvent.OnServerEvent:Connect(function(player, gearType, gearName)
+	local pStats = player:FindFirstChild("PlayerStats")
+	if pStats then
+		local gearVal = pStats:FindFirstChild("Gear" .. gearType)
+		if not gearVal then gearVal = Instance.new("StringValue", pStats); gearVal.Name = "Gear" .. gearType end
+		gearVal.Value = gearName
+	end
+end)
+
+EquipMoveEvent.OnServerEvent:Connect(function(player, slotIndex, moveId)
+	local pStats = player:FindFirstChild("PlayerStats")
+	if pStats then
+		local slotVal = pStats:FindFirstChild("MoveSlot" .. slotIndex)
+		if not slotVal then slotVal = Instance.new("StringValue", pStats); slotVal.Name = "MoveSlot" .. slotIndex end
+		slotVal.Value = moveId
+	end
+end)
+
+-- ==========================================
+-- BATTLE ENGINE STATE & LOGGING
+-- ==========================================
+local BattleState = {
+	IsActive = false, TurnQueue = {}, ActiveTurn = "", Combatants = {}, Result = nil, CurrentLog = "",
+	IsGauntlet = false, ZoneId = "1", Wave = 1, ExamPoints = 0, AccumulatedRewards = {},
+	StartTime = 0, ZeroPointerSpawned = false
+}
+
+local StatusColors = {
+	Burn = "#FF5500", Bleed = "#CC0000", Stun = "#FFFF00", 
+	Corrode = "#32CD32", Hardened = "#A9A9A9", Brittle = "#87CEFA", 
+	Erasure = "#800080", Float = "#DDA0DD", Overclock = "#FF8C00" 
+}
+
+local function Colorize(text, status)
+	local hex = StatusColors[status] or "#FFFFFF"
+	return string.format("<font color='%s'><b>%s</b></font>", hex, text)
+end
+
+local function AppendLog(msg)
+	if BattleState.CurrentLog == "" then BattleState.CurrentLog = msg else BattleState.CurrentLog = BattleState.CurrentLog .. " " .. msg end
+	print("LOG:", msg) 
+end
+
+local function ApplyStatus(target, statusType, duration)
+	if not target then return end
+	target.Status = { Type = statusType, Duration = duration }
+	AppendLog("It inflicted " .. Colorize(statusType, statusType) .. "!")
+end
+
+-- ==========================================
+-- GDD MOVESET DATABASE
+-- ==========================================
+local MoveDatabase = {
+	-- ================= EXTENDED LOGIC DATABASE =================
+	-- Insert these into the MoveDatabase table
+
+	-- TRASH
+	["mud_sling"] = { Name = "Mud Sling", Desc = "30% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.STR * 0.3 end },
+	["eye_gouge"] = { Name = "Dirty Eye Gouge", Desc = "45% STR. Lowers accuracy.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) ApplyStatus(target, "Blind", 1); return user.Stats.STR * 0.45 end },
+	["coward_retreat"] = { Name = "Coward's Retreat", Desc = "Dodge Buff.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(user, "DodgeUp", 2); return 0 end },
+
+	["anxious_mumble"] = { Name = "Anxious Mumble", Desc = "20% INT. Damage debuff.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) ApplyStatus(target, "Weaken", 2); return user.Stats.INT * 0.2 end },
+	["merch_throw"] = { Name = "Merch Throw", Desc = "40% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.STR * 0.4 end },
+	["distract_flash"] = { Name = "Distracting Flashbulb", Desc = "20% chance to Stun.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) if math.random() <= 0.2 then ApplyStatus(target, "Stun", 1) end; return 0 end },
+
+	-- COMMON
+	["heavy_cross"] = { Name = "Heavy Cross", Desc = "70% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.STR * 0.7 end },
+	["brass_upper"] = { Name = "Brass Uppercut", Desc = "85% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 1, Execute = function(user, target) return user.Stats.STR * 0.85 end },
+	["alley_cheap_shot"] = { Name = "Alleyway Cheap Shot", Desc = "100% STR. Bleeds.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Bleed", 2); return user.Stats.STR * 1.0 end },
+
+	["taser_prod"] = { Name = "Malfunctioning Taser", Desc = "75% STR. Low stun chance.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) if math.random() <= 0.3 then ApplyStatus(target, "Stun", 1) end; return user.Stats.STR * 0.75 end },
+	["net_gun"] = { Name = "Net Gun", Desc = "80% AGI. Lowers speed.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Slow", 2); return user.Stats.AGI * 0.8 end },
+	["wrench_toss"] = { Name = "Wrench Toss", Desc = "110% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 2, Execute = function(user, target) return user.Stats.STR * 1.1 end },
+
+	-- UNCOMMON
+	["quick_jab"] = { Name = "Quick Jab", Desc = "90% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.AGI * 0.9 end },
+	["body_blow"] = { Name = "Body Blow", Desc = "100% STR. Brittle.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) ApplyStatus(target, "Brittle", 2); return user.Stats.STR * 1.0 end },
+	["dempsey_roll"] = { Name = "Dempsey Roll", Desc = "130% STR AoE.", Type = "Style", HasStatus = false, IsAoE = true, BaseCD = 4, Execute = function(user, target) return user.Stats.STR * 1.3 end },
+
+	["flip_kick"] = { Name = "Flip Kick", Desc = "95% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.AGI * 0.95 end },
+	["evasive_spring"] = { Name = "Evasive Handspring", Desc = "Dodge Buff.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(user, "HighDodge", 2); return 0 end },
+	["meteor_dropkick"] = { Name = "Meteor Dropkick", Desc = "140% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 3, Execute = function(user, target) return user.Stats.AGI * 1.4 end },
+
+	-- RARE
+	["twin_slash"] = { Name = "Twin Slash", Desc = "110% AGI. Bleed.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 0, Execute = function(user, target) ApplyStatus(target, "Bleed", 2); return user.Stats.AGI * 1.1 end },
+	["blood_draw"] = { Name = "Blood Draw", Desc = "100% STR. Lifesteal 50%.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 3, Execute = function(user, target) local dmg = user.Stats.STR * 1.0; HealEntity(user, dmg * 0.5); return dmg end },
+	["acrobatic_lunge"] = { Name = "Acrobatic Lunge", Desc = "160% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 2, Execute = function(user, target) return user.Stats.AGI * 1.6 end },
+
+	["feral_claw"] = { Name = "Feral Claw", Desc = "120% STR. Bleed.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 0, Execute = function(user, target) ApplyStatus(target, "Bleed", 2); return user.Stats.STR * 1.2 end },
+	["roaring_fear"] = { Name = "Roaring Intimidation", Desc = "AoE Weaken.", Type = "Style", HasStatus = true, IsAoE = true, BaseCD = 5, Execute = function(user, target) ApplyStatus(target, "Weaken", 3); return 0 end },
+	["savage_pounce"] = { Name = "Savage Pounce", Desc = "180% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 3, Execute = function(user, target) return user.Stats.STR * 1.8 end },
+
+	-- ELITE
+	["ricochet_shot"] = { Name = "Ricochet Shot", Desc = "130% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.AGI * 1.3 end },
+	["smoke_grenade"] = { Name = "Smoke Grenade", Desc = "AoE Blind.", Type = "Style", HasStatus = true, IsAoE = true, BaseCD = 5, Execute = function(user, target) ApplyStatus(target, "Blind", 1); return 0 end },
+	["locked_headshot"] = { Name = "Locked-On Headshot", Desc = "200% AGI. Un-dodgeable.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 4, Execute = function(user, target) return user.Stats.AGI * 2.0 end }, -- Dodge bypass logic handled in combat core
+
+	["scarf_whip"] = { Name = "Scarf Whip", Desc = "130% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.AGI * 1.3 end },
+	["constrict"] = { Name = "Constrict", Desc = "100% STR. Gravity/Bind.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(target, "Gravity", 2); return user.Stats.STR * 1.0 end },
+	["pendulum_kick"] = { Name = "Pendulum Kick", Desc = "180% AGI.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 2, Execute = function(user, target) return user.Stats.AGI * 1.8 end },
+
+	-- EPIC
+	["hundred_slap"] = { Name = "Hundred-Hand Slap", Desc = "140% STR AoE.", Type = "Style", HasStatus = false, IsAoE = true, BaseCD = 2, Execute = function(user, target) return user.Stats.STR * 1.4 end },
+	["unmovable_stance"] = { Name = "Unmovable Mountain", Desc = "Armor Buff.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 5, Execute = function(user, target) ApplyStatus(user, "ArmorUp", 3); return 0 end },
+	["spear_charge"] = { Name = "Spear Charge", Desc = "220% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 3, Execute = function(user, target) return user.Stats.STR * 2.2 end },
+
+	["pressure_point"] = { Name = "Pressure Point Strike", Desc = "140% AGI. Erasure.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(target, "Erasure", 1); return user.Stats.AGI * 1.4 end },
+	["foresight_counter"] = { Name = "Foresight Counter", Desc = "Counter Buff.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 6, Execute = function(user, target) ApplyStatus(user, "CounterStance", 1); return 0 end },
+	["centipede_smash"] = { Name = "Centipede Smash", Desc = "240% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 4, Execute = function(user, target) return user.Stats.STR * 2.4 end },
+
+	-- LEGENDARY
+	["luna_ring"] = { Name = "Luna Ring", Desc = "160% AGI AoE.", Type = "Style", HasStatus = false, IsAoE = true, BaseCD = 2, Execute = function(user, target) return user.Stats.AGI * 1.6 end },
+	["luna_fall"] = { Name = "Luna Fall", Desc = "220% AGI. Brittle.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(target, "Brittle", 2); return user.Stats.AGI * 2.2 end },
+	["luna_arc"] = { Name = "Luna Arc", Desc = "350% AGI. Ignores Block.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 6, Execute = function(user, target) return user.Stats.AGI * 3.5 end },
+
+	["stun_strike"] = { Name = "Stun Grenade Strike", Desc = "150% STR. Stun.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.STR * 1.5 end },
+	["howitzer_spin"] = { Name = "Howitzer Spin", Desc = "200% STR AoE.", Type = "Style", HasStatus = false, IsAoE = true, BaseCD = 4, Execute = function(user, target) return user.Stats.STR * 2.0 end },
+	["x_catapult"] = { Name = "X-Catapult", Desc = "380% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 6, Execute = function(user, target) return user.Stats.STR * 3.8 end },
+
+	["curve_bullet"] = { Name = "Curve Bullet", Desc = "170% AGI. Never misses.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.AGI * 1.7 end },
+	["hair_trigger"] = { Name = "Hair-Trigger", Desc = "Next move 3x Dmg.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 7, Execute = function(user, target) ApplyStatus(user, "FocusAim", 1); return 0 end },
+	["aerial_sniper"] = { Name = "Aerial Sniper", Desc = "400% AGI. Armor Shred.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 6, Execute = function(user, target) ApplyStatus(target, "Corrode", 3); return user.Stats.AGI * 4.0 end }
+	,
+	["basic_strike"] = { Name = "Basic Strike", Desc = "100% STR.", Type = "Basic", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.STR * 1.0 end },
+	["heavy_strike"] = { Name = "Heavy Strike", Desc = "180% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 2, Execute = function(user, target) return user.Stats.STR * 1.8 end },
+	["knife_slash"] = { Name = "Knife Slash", Desc = "100% STR. Bleeds.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) ApplyStatus(target, "Bleed", 3); return user.Stats.STR * 1.0 end },
+	["nomu_brawl"] = { Name = "Shock Absorption", Desc = "250% STR. Buffs armor.", Type = "Style", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(user, "Hardened", 2); return user.Stats.STR * 2.5 end },
+	["brutal_hook"] = { Name = "Brutal Hook", Desc = "200% STR.", Type = "Style", HasStatus = false, IsAoE = false, BaseCD = 2, Execute = function(user, target) return user.Stats.STR * 2.0 end },
+	
+	-- ================= TRASH QUIRKS =================
+	-- Long Neck
+	["neck_whip"] = { Name = "Neck Whip", Desc = "100% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.0 end },
+	["headbutt_rush"] = { Name = "Headbutt Rush", Desc = "150% QF. Stuns.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 1.5 end },
+	["giraffe_slam"] = { Name = "Giraffe Slam", Desc = "200% QF AoE.", Type = "Quirk", HasStatus = false, IsAoE = true, BaseCD = 4, Execute = function(user, target) return user.Stats.QF * 2.0 end },
+
+	-- Eye Pop
+	["creepy_stare"] = { Name = "Creepy Stare", Desc = "50% QF. Applies Brittle.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) ApplyStatus(target, "Brittle", 2); return user.Stats.QF * 0.5 end },
+	["eye_bulge"] = { Name = "Eye Bulge", Desc = "100% QF. Stuns.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 1.0 end },
+	["optic_blast"] = { Name = "Optic Blast", Desc = "180% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 3, Execute = function(user, target) return user.Stats.QF * 1.8 end },
+
+	-- ================= COMMON QUIRKS =================
+	-- Tape
+	["tape_whip"] = { Name = "Tape Whip", Desc = "120% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.2 end },
+	["tape_trap"] = { Name = "Tape Trap", Desc = "110% QF. Stuns.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 1.1 end },
+	["tape_barricade"] = { Name = "Tape Barricade", Desc = "150% QF AoE.", Type = "Quirk", HasStatus = false, IsAoE = true, BaseCD = 4, Execute = function(user, target) return user.Stats.QF * 1.5 end },
+
+	-- Tail
+	["tail_swipe"] = { Name = "Tail Swipe", Desc = "130% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.3 end },
+	["tail_slam"] = { Name = "Tail Slam", Desc = "160% QF. Brittle.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Brittle", 2); return user.Stats.QF * 1.6 end },
+	["tornado_tail"] = { Name = "Tornado Tail", Desc = "220% QF AoE.", Type = "Quirk", HasStatus = false, IsAoE = true, BaseCD = 4, Execute = function(user, target) return user.Stats.QF * 2.2 end },
+
+	-- ================= UNCOMMON QUIRKS =================
+	-- Navel Laser
+	["laser_beam"] = { Name = "Laser Beam", Desc = "150% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.5 end },
+	["dazzling_shine"] = { Name = "Dazzling Shine", Desc = "100% QF. Stuns.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 1.0 end },
+	["twinkling_laser"] = { Name = "Can't Stop Twinkling", Desc = "250% QF AoE. Burns.", Type = "Quirk", HasStatus = true, IsAoE = true, BaseCD = 5, Execute = function(user, target) ApplyStatus(target, "Burn", 3); return user.Stats.QF * 2.5 end },
+
+	-- Hardening
+	["hard_punch"] = { Name = "Hardened Punch", Desc = "150% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.5 end },
+	["red_counter"] = { Name = "Red Counter", Desc = "180% QF. Armor Buff.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(user, "Hardened", 3); return user.Stats.QF * 1.8 end },
+	["unbreakable_smash"] = { Name = "Unbreakable Smash", Desc = "300% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 5, Execute = function(user, target) return user.Stats.QF * 3.0 end },
+
+	-- ================= RARE QUIRKS =================
+	-- Acid
+	["acid_shot"] = { Name = "Acid Shot", Desc = "150% QF. Corrodes.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 2, Execute = function(user, target) ApplyStatus(target, "Corrode", 3); return user.Stats.QF * 1.5 end },
+	["acid_veil"] = { Name = "Acid Veil", Desc = "200% QF. Armor Buff.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(user, "Hardened", 2); return user.Stats.QF * 2.0 end },
+	["acidman"] = { Name = "Acidman Burst", Desc = "350% QF AoE. Corrodes.", Type = "Quirk", HasStatus = true, IsAoE = true, BaseCD = 6, Execute = function(user, target) ApplyStatus(target, "Corrode", 3); return user.Stats.QF * 3.5 end },
+
+	-- Dark Shadow
+	["shadow_strike"] = { Name = "Shadow Strike", Desc = "180% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.8 end },
+	["shadow_crush"] = { Name = "Shadow Crush", Desc = "250% QF. Brittle.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Brittle", 2); return user.Stats.QF * 2.5 end },
+	["abyssal_rampage"] = { Name = "Abyssal Rampage", Desc = "400% QF AoE.", Type = "Quirk", HasStatus = false, IsAoE = true, BaseCD = 6, Execute = function(user, target) return user.Stats.QF * 4.0 end },
+
+	-- ELITE QUIRKS
+	["engine_kick"] = { Name = "Engine Kick", Desc = "180% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.8 end },
+	["torque_smash"] = { Name = "Torque Smash", Desc = "220% QF. Brittle.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Brittle", 2); return user.Stats.QF * 2.2 end },
+	["recipro_burst"] = { Name = "Recipro Burst", Desc = "Take 3 turns. Engine stalls after.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 8, Execute = function(user, target) table.insert(BattleState.TurnQueue, 1, user.Id); table.insert(BattleState.TurnQueue, 1, user.Id); ApplyStatus(user, "Overclock", 3); AppendLog(user.Name .. " overclocked their engine for 3 consecutive turns!"); return 0 end },
+	["recipro_extend"] = { Name = "Recipro Extend", Desc = "400% QF. Self-Stun.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(user, "Stun", 1); AppendLog(user.Name .. "'s engine stalled!"); return user.Stats.QF * 4.0 end },
+
+	["persona_chord"] = { Name = "Persona Chord", Desc = "100% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.0 end },
+	["brainwash_command"] = { Name = "Mind Command", Desc = "Uses Target's STR.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) AppendLog(user.Name .. " commanded " .. target.Name .. " to hit themselves!"); return target.Stats.STR * 2.5 end },
+	["vocal_cords"] = { Name = "Artificial Vocal Cords", Desc = "150% QF AoE. Stuns.", Type = "Quirk", HasStatus = true, IsAoE = true, BaseCD = 5, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 1.5 end },
+
+	["static_shock"] = { Name = "Static Shock", Desc = "160% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.6 end },
+	["target_electro"] = { Name = "Target Electroshock", Desc = "200% QF. Stuns.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 3, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 2.0 end },
+	["million_volts"] = { Name = "1.3 Million Volts", Desc = "500% QF AoE. Self-Stun.", Type = "Quirk", HasStatus = true, IsAoE = true, BaseCD = 6, Execute = function(user, target) ApplyStatus(user, "Stun", 1); AppendLog(user.Name .. " short-circuited their brain!"); return user.Stats.QF * 5.0 end },
+
+	["gravity_strike"] = { Name = "Gravity Strike", Desc = "160% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 0, Execute = function(user, target) return user.Stats.QF * 1.6 end },
+	["weightless_float"] = { Name = "Weightless Float", Desc = "Locks physical attacks.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(target, "Float", 2); AppendLog(target.Name .. " is floating helplessly!"); return 0 end },
+	["meteor_shower"] = { Name = "Meteor Shower", Desc = "350% QF AoE.", Type = "Quirk", HasStatus = false, IsAoE = true, BaseCD = 4, Execute = function(user, target) return user.Stats.QF * 3.5 end },
+	
+	-- FALLBACKS
+	["voice_shout"] = { Name = "Voice Shout", Desc = "Stuns target.", Type = "Quirk", HasStatus = true, IsAoE = false, BaseCD = 4, Execute = function(user, target) ApplyStatus(target, "Stun", 1); return user.Stats.QF * 1.5 end },
+	["sound_wave"] = { Name = "Sound Wave", Desc = "200% QF.", Type = "Quirk", HasStatus = false, IsAoE = false, BaseCD = 2, Execute = function(user, target) return user.Stats.QF * 2.0 end },
+}
+
+-- ==========================================
+-- GAUNTLET & WAVE LOGIC
+-- ==========================================
+local function CalculateDodge(user, target)
+	if not user or not target then return false end 
+	local dodgeChance = 5 + math.max(0, (target.Stats.AGI - user.Stats.AGI) / 5)
+	return math.random(1, 100) <= math.clamp(dodgeChance, 5, 50)
+end
+
+-- MISSING FUNCTION RESTORED!
+local function AwardRewards()
+	for id, data in pairs(BattleState.Combatants) do
+		if not data.IsEnemy then
+			local plr = Players:FindFirstChild(id)
+			if plr and plr:FindFirstChild("PlayerStats") then
+				local pStats = plr.PlayerStats
+
+				for rewardName, amount in pairs(BattleState.AccumulatedRewards) do
+					if rewardName == "MasteryXP" then
+						if pStats:FindFirstChild("QuirkMasteryXP") then pStats.QuirkMasteryXP.Value += amount end
+						if pStats:FindFirstChild("StyleMasteryXP") then pStats.StyleMasteryXP.Value += amount end
+					else
+						local statVal = pStats:FindFirstChild(rewardName)
+						if statVal and statVal:IsA("IntValue") then
+							statVal.Value += amount
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function ProcessDeaths()
+	for id, data in pairs(BattleState.Combatants) do
+		if data.HP <= 0 and not data.IsDead then
+			data.IsDead = true
+
+			if data.IsEnemy then
+				BattleState.ExamPoints += (data.Points or 0)
+
+				if data.Rewards then
+					for rewardName, amount in pairs(data.Rewards) do
+						BattleState.AccumulatedRewards[rewardName] = (BattleState.AccumulatedRewards[rewardName] or 0) + amount
+					end
+				end
+
+				AppendLog(Colorize(data.Name .. " destroyed! (+" .. (data.Points or 0) .. " Pts)", "Stun"))
+
+				if data.IsBoss and math.random(1, 100) <= 25 then
+					BattleState.AccumulatedRewards["SupportGearBox"] = (BattleState.AccumulatedRewards["SupportGearBox"] or 0) + 1
+					AppendLog(Colorize("A Support Gear Box dropped!", "Brittle"))
+				end
+			else
+				AppendLog(Colorize(data.Name .. " was knocked out!", "Bleed"))
+			end
+		end
+	end
+end
+
+local function EvaluateGauntlet()
+	BattleState.IsActive = false
+
+	if BattleState.ExamPoints >= 50 then
+		local bonusMult = 1
+		local title = "EXAM PASSED!"
+
+		if BattleState.ExamPoints > 76 then
+			bonusMult = 2
+			title = "NUMBER 1 EXAMINEE! (2X REWARDS)"
+		end
+
+		for k, v in pairs(BattleState.AccumulatedRewards) do
+			BattleState.AccumulatedRewards[k] = v * bonusMult
+		end
+
+		AppendLog(Colorize(title .. " Total Points: " .. BattleState.ExamPoints, "Stun"))
+		BattleState.Result = { Type = "Victory", Rewards = BattleState.AccumulatedRewards }
+
+		for id, data in pairs(BattleState.Combatants) do
+			if not data.IsEnemy then
+				local plr = Players:FindFirstChild(id)
+				if plr and plr:FindFirstChild("PlayerStats") then
+					local hz = plr.PlayerStats:FindFirstChild("HighestZoneCleared")
+					if not hz then hz = Instance.new("IntValue", plr.PlayerStats); hz.Name = "HighestZoneCleared" end
+					if hz.Value < 1 then hz.Value = 1 end
+				end
+			end
+		end
+	else
+		AppendLog(Colorize("EXAM FAILED. You scored " .. BattleState.ExamPoints .. " / 50 points.", "Bleed"))
+		BattleState.Result = { Type = "Defeat", Rewards = BattleState.AccumulatedRewards } 
+	end
+
+	AwardRewards() 
+end
+
+local function SpawnWave()
+	AppendLog(Colorize("--- WAVE " .. BattleState.Wave .. " APPROACHING! ---", "Burn"))
+	BattleState.Wave += 1
+
+	for id, data in pairs(BattleState.Combatants) do
+		if data.IsEnemy then BattleState.Combatants[id] = nil end
+	end
+
+	local numEnemies = math.random(1, 3)
+	for i = 1, numEnemies do
+		local roll = math.random(1, 100)
+		local enemyType = ""
+
+		if roll <= 50 then enemyType = "1-Pointer"
+		elseif roll <= 80 then enemyType = "2-Pointer"
+		elseif roll <= 95 then enemyType = "3-Pointer"
+		elseif roll <= 99 then enemyType = "0-Pointer"
+		else enemyType = "Present Mic" end
+
+		local template = EnemyTemplates[enemyType]
+		local eId = "Enemy_"..i.."_"..math.random(1000,9999)
+
+		BattleState.Combatants[eId] = {
+			Id = eId, Name = template.Name, IsEnemy = true, IsDead = false,
+			HP = template.HP, MaxHP = template.HP, Status = {Type = "Normal", Duration = 0}, 
+			Portrait = template.Portrait, Stats = table.clone(template.Stats), 
+			EquippedMoves = template.Moves, Cooldowns = {},
+			Points = template.Points, Rewards = template.Rewards, IsBoss = template.IsBoss
+		}
+	end
+end
+
+local function CheckBattleEnd()
+	ProcessDeaths() 
+
+	if BattleState.IsGauntlet then
+		local elapsedTime = os.time() - BattleState.StartTime
+		if elapsedTime >= 600 then
+			AppendLog(Colorize("BUZZER SOUNDS! The 10-minute exam is over!", "Stun"))
+			EvaluateGauntlet()
+			return true
+		end
+	end
+
+	local playersAlive, enemiesAlive = false, false
+	for id, data in pairs(BattleState.Combatants) do
+		if not data.IsDead then
+			if data.IsEnemy then enemiesAlive = true else playersAlive = true end
+		end
+	end
+
+	if not playersAlive then
+		if BattleState.IsGauntlet then
+			EvaluateGauntlet()
+		else
+			BattleState.IsActive = false
+			BattleState.Result = { Type = "Defeat", Rewards = BattleState.AccumulatedRewards }
+			AwardRewards()
+		end
+		return true
+	elseif not enemiesAlive then
+		if BattleState.IsGauntlet then
+			SpawnWave() 
+			return false 
+		else
+			BattleState.IsActive = false
+			BattleState.Result = { Type = "Victory", Rewards = BattleState.AccumulatedRewards }
+			AwardRewards()
+			return true
+		end
+	end
+	return false
+end
+
+-- ==========================================
+-- CORE BATTLE LOGIC
+-- ==========================================
+local function CalculateTurnQueue()
+	local sorted = {}
+	for id, data in pairs(BattleState.Combatants) do
+		if data.HP > 0 and not data.IsDead then table.insert(sorted, data) end
+	end
+	table.sort(sorted, function(a, b) return a.Stats.AGI > b.Stats.AGI end)
+	BattleState.TurnQueue = {}
+	for _, combatant in ipairs(sorted) do table.insert(BattleState.TurnQueue, combatant.Id) end
+end
+
+local function BroadcastState()
+	local visualQueue = {}
+	if BattleState.ActiveTurn ~= "" then table.insert(visualQueue, BattleState.ActiveTurn) end
+	for _, id in ipairs(BattleState.TurnQueue) do table.insert(visualQueue, id) end
+
+	local logToSend = BattleState.CurrentLog
+	BattleState.CurrentLog = ""
+
+	local clientData = {
+		IsActive = BattleState.IsActive, TurnQueue = visualQueue, ActiveTurn = BattleState.ActiveTurn,
+		Result = BattleState.Result, LogMessage = logToSend, Combatants = {}, AvailableMoves = {}
+	}
+
+	for id, data in pairs(BattleState.Combatants) do
+		if not data.IsDead then
+			clientData.Combatants[id] = { Name = data.Name, IsEnemy = data.IsEnemy, HP = data.HP, MaxHP = data.MaxHP, Status = data.Status, Portrait = data.Portrait }
+		end
+	end
+
+	local activeEntity = BattleState.Combatants[BattleState.ActiveTurn]
+	if activeEntity and not activeEntity.IsEnemy then
+		for _, moveId in ipairs(activeEntity.EquippedMoves) do
+			local md = MoveDatabase[moveId]
+			if md then
+				local state = "Normal"
+				if activeEntity.Status.Type == "Erasure" and md.Type == "Quirk" then state = "Erasure" end
+				if activeEntity.Status.Type == "Float" and (md.Type == "Style" or md.Type == "Basic") then state = "Erasure" end
+
+				table.insert(clientData.AvailableMoves, {
+					Id = moveId, Name = md.Name, Type = md.Type, Desc = md.Desc, IsQuirk = (md.Type == "Quirk"), State = state
+				})
+			end
+		end
+	end
+	CombatUpdateEvent:FireAllClients(clientData)
+end
+
+local function ProcessStatusEffects(entity)
+	if entity.Status.Type == "Normal" then return false end 
+	local skipTurn = false
+	local status = entity.Status
+
+	if status.Type == "Burn" then
+		local burnDmg = math.floor(entity.MaxHP * 0.05)
+		entity.HP = math.clamp(entity.HP - burnDmg, 0, entity.MaxHP)
+		AppendLog(entity.Name .. " took " .. burnDmg .. " " .. Colorize("Burn", "Burn") .. " damage!")
+	elseif status.Type == "Bleed" then
+		entity.HP = math.clamp(entity.HP - 50, 0, entity.MaxHP)
+		AppendLog(entity.Name .. " took 50 " .. Colorize("Bleed", "Bleed") .. " damage!")
+	elseif status.Type == "Stun" then
+		AppendLog(entity.Name .. " is " .. Colorize("Stunned", "Stun") .. " and skipped their turn!")
+		skipTurn = true 
+	end
+
+	status.Duration -= 1
+	if status.Duration <= 0 then 
+		if status.Type == "Overclock" then
+			entity.Status = { Type = "Erasure", Duration = 3 }
+			AppendLog(Colorize(entity.Name .. "'s engine stalled! Quirks locked for 3 turns.", "Erasure"))
+		else
+			entity.Status = { Type = "Normal", Duration = 0 } 
+		end
+	end
+	return skipTurn
+end
+
+local function ProcessDamage(target, rawDamage)
+	if not target then return 0 end
+	local armorMitigation = target.Stats.END * 0.5 
+	if target.Status.Type == "Corrode" then armorMitigation = 0 end 
+
+	local finalDamage = math.floor(math.max(1, rawDamage - armorMitigation))
+	if target.Status.Type == "Brittle" then finalDamage = math.floor(finalDamage * 1.5) end
+
+	target.HP = math.clamp(target.HP - finalDamage, 0, target.MaxHP)
+	return finalDamage
+end
+
+local function ExecuteAttack(user, target, moveData)
+	if not user or not target then return end 
+	if CalculateDodge(user, target) then
+		AppendLog("-> But " .. target.Name .. " dodged the attack!")
+	else
+		local rawDmg = moveData.Execute(user, target)
+		local finalDmg = ProcessDamage(target, rawDmg)
+		if finalDmg > 1 then AppendLog("-> It dealt " .. finalDmg .. " damage to " .. target.Name .. ".") end
+	end
+end
+
+local function NextTurn()
+	if not BattleState.IsActive then return end
+	if CheckBattleEnd() then BroadcastState(); return end
+
+	if BattleState.IsGauntlet and not BattleState.ZeroPointerSpawned then
+		local elapsedTime = os.time() - BattleState.StartTime
+		if elapsedTime >= 480 then
+			BattleState.ZeroPointerSpawned = true
+			AppendLog(Colorize("WARNING: 2 MINUTES REMAINING! A colossal Zero-Pointer has entered the testing ground!", "Bleed"))
+
+			local template = EnemyTemplates["0-Pointer"]
+			local eId = "Enemy_Zero_" .. math.random(1000, 9999)
+
+			BattleState.Combatants[eId] = {
+				Id = eId, Name = template.Name, IsEnemy = true, IsDead = false,
+				HP = template.HP, MaxHP = template.HP, Status = {Type = "Normal", Duration = 0}, 
+				Portrait = template.Portrait, Stats = table.clone(template.Stats), 
+				EquippedMoves = template.Moves, Cooldowns = {},
+				Points = template.Points, Rewards = template.Rewards, IsBoss = template.IsBoss
+			}
+			CalculateTurnQueue() 
+		end
+	end
+
+	if #BattleState.TurnQueue == 0 then CalculateTurnQueue() end
+
+	BattleState.ActiveTurn = table.remove(BattleState.TurnQueue, 1)
+	local activeEntity = BattleState.Combatants[BattleState.ActiveTurn]
+
+	if not activeEntity or activeEntity.HP <= 0 or activeEntity.IsDead then NextTurn(); return end
+
+	local skipTurn = ProcessStatusEffects(activeEntity)
+	if activeEntity.HP <= 0 then NextTurn(); return end 
+
+	if not activeEntity.IsEnemy then BroadcastState() end
+
+	if skipTurn then 
+		task.wait(1.5)
+		ProcessDeaths()
+		BroadcastState()
+		NextTurn()
+		return 
+	end
+
+	-- ENEMY AI
+	if activeEntity.IsEnemy then
+		task.wait(1.5)
+		local target = nil
+		for id, data in pairs(BattleState.Combatants) do
+			if not data.IsEnemy and data.HP > 0 and not data.IsDead then target = data; break end
+		end
+
+		if target then
+			for moveId, cd in pairs(activeEntity.Cooldowns) do
+				if cd > 0 then activeEntity.Cooldowns[moveId] = cd - 1 end
+			end
+
+			local chosenMoveId = nil
+			local highestPriority = 99
+
+			for _, moveId in ipairs(activeEntity.EquippedMoves) do
+				if (activeEntity.Cooldowns[moveId] or 0) <= 0 then
+					local md = MoveDatabase[moveId]
+					if md then
+						local canUse = true
+						if activeEntity.Status.Type == "Erasure" and md.Type == "Quirk" then canUse = false end
+						if activeEntity.Status.Type == "Float" and (md.Type == "Style" or md.Type == "Basic") then canUse = false end
+
+						if canUse then
+							local priority = 4 
+							if md.HasStatus then priority = 1
+							elseif md.Type == "Quirk" then priority = 2
+							elseif md.Type == "Style" then priority = 3 end
+
+							if priority < highestPriority then
+								highestPriority = priority; chosenMoveId = moveId
+							end
+						end
+					end
+				end
+			end
+
+			if chosenMoveId then
+				local selectedMoveData = MoveDatabase[chosenMoveId]
+				activeEntity.Cooldowns[chosenMoveId] = selectedMoveData.BaseCD or 0
+				AppendLog(activeEntity.Name .. " used " .. selectedMoveData.Name .. "!")
+				ExecuteAttack(activeEntity, target, selectedMoveData)
+			else
+				AppendLog(activeEntity.Name .. " struggled but couldn't use any moves!")
+			end
+		end
+
+		ProcessDeaths()
+		BroadcastState()
+		task.wait(1)
+		NextTurn()
+	end
+end
+
+-- LISTEN FOR PLAYER ATTACKS
+CombatActionEvent.OnServerEvent:Connect(function(player, moveId, targetId)
+	if not BattleState.IsActive then return end
+	if BattleState.ActiveTurn ~= player.Name then return end 
+
+	BattleState.ActiveTurn = "Processing"
+
+	local user = BattleState.Combatants[player.Name]
+	local moveData = MoveDatabase[moveId]
+	local primaryTarget = BattleState.Combatants[targetId]
+
+	if user and moveData then
+		if user.Status.Type == "Erasure" and moveData.Type == "Quirk" then return end
+		if user.Status.Type == "Float" and (moveData.Type == "Style" or moveData.Type == "Basic") then return end
+
+		if moveData.IsAoE then
+			AppendLog(user.Name .. " used AoE: " .. moveData.Name .. "!")
+			for id, data in pairs(BattleState.Combatants) do
+				if data.IsEnemy and data.HP > 0 and not data.IsDead then ExecuteAttack(user, data, moveData) end
+			end
+		elseif primaryTarget and primaryTarget.IsEnemy and primaryTarget.HP > 0 and not primaryTarget.IsDead then
+			AppendLog(user.Name .. " used " .. moveData.Name .. " against " .. primaryTarget.Name .. "!")
+			ExecuteAttack(user, primaryTarget, moveData)
+		else
+			BattleState.ActiveTurn = player.Name
+			return 
+		end
+
+		ProcessDeaths()
+		BroadcastState()
+		task.wait(1)
+		NextTurn()
+	end
+end)
+
+-- STORY MODE ENCOUNTER GENERATOR
+StartCombatEvent.OnServerEvent:Connect(function(player, zoneId)
+	if BattleState.IsActive then return end
+
+	local pStats = player:FindFirstChild("PlayerStats")
+	local highestZone = (pStats and pStats:FindFirstChild("HighestZoneCleared")) and pStats.HighestZoneCleared.Value or 0
+	local isGauntlet = (zoneId == "1" and highestZone < 1)
+
+	BattleState.IsActive = true
+	BattleState.Result = nil
+	BattleState.CurrentLog = "Encounter started! Zone " .. zoneId
+	BattleState.Combatants = {}
+	BattleState.IsGauntlet = isGauntlet
+	BattleState.ZoneId = zoneId
+	BattleState.Wave = 1
+	BattleState.ExamPoints = 0
+	BattleState.AccumulatedRewards = { HeroCoins = 0, TrainingXP = 0, Spins = 0, MasteryXP = 0 }
+	BattleState.StartTime = os.time()
+	BattleState.ZeroPointerSpawned = false
+
+	local playerMoves = {}
+	if pStats then
+		for i = 1, 4 do
+			local slotVal = pStats:FindFirstChild("MoveSlot" .. i)
+			if slotVal and slotVal.Value ~= "" and slotVal.Value ~= "Empty" then
+				table.insert(playerMoves, slotVal.Value)
+			end
+		end
+	end
+	if #playerMoves == 0 then table.insert(playerMoves, "basic_strike") end
+
+	local baseSTR = (pStats and pStats:FindFirstChild("Strength")) and math.max(pStats.Strength.Value, 100) or 100
+	local baseAGI = (pStats and pStats:FindFirstChild("Agility")) and math.max(pStats.Agility.Value, 100) or 100
+	local baseEND = (pStats and pStats:FindFirstChild("Endurance")) and math.max(pStats.Endurance.Value, 50)  or 50
+	local baseQF  = (pStats and pStats:FindFirstChild("QuirkFactor")) and math.max(pStats.QuirkFactor.Value, 100) or 100
+
+	local finalStats = { STR = baseSTR, AGI = baseAGI, END = baseEND, QF = baseQF }
+
+	if pStats then
+		local gearTypes = {"WEAPON", "ARMOR", "ASSIST"}
+		for _, gType in ipairs(gearTypes) do
+			local gVal = pStats:FindFirstChild("Gear" .. gType)
+			if gVal and gVal.Value ~= "" and GearDatabase[gVal.Value] then
+				local bonus = GearDatabase[gVal.Value].Stats
+				finalStats.STR += bonus.STR
+				finalStats.AGI += bonus.AGI
+				finalStats.END += bonus.END
+				finalStats.QF  += bonus.QF
+			end
+		end
+	end
+
+	local finalMaxHP = 1000 + (finalStats.END * 10)
+
+	BattleState.Combatants[player.Name] = {
+		Id = player.Name, Name = player.Name, IsEnemy = false, IsDead = false,
+		HP = finalMaxHP, MaxHP = finalMaxHP, Status = {Type = "Normal", Duration = 0}, 
+		Portrait = "https://www.roblox.com/headshot-thumbnail/image?userId="..player.UserId.."&width=150&height=150&format=png",
+		Stats = finalStats, 
+		EquippedMoves = playerMoves, 
+		Cooldowns = {}
+	}
+
+	if isGauntlet then
+		SpawnWave()
+	else
+		local template = EnemyTemplates["0-Pointer"]
+		BattleState.Combatants["Boss_0Pointer"] = {
+			Id = "Boss_0Pointer", Name = template.Name, IsEnemy = true, IsDead = false,
+			HP = template.HP, MaxHP = template.HP, Status = {Type = "Normal", Duration = 0}, 
+			Portrait = template.Portrait, Stats = table.clone(template.Stats), 
+			EquippedMoves = template.Moves, Cooldowns = {}, Points = template.Points, 
+			Rewards = template.Rewards, IsBoss = true
+		}
+	end
+
+	CalculateTurnQueue()
+	NextTurn()
+end)
